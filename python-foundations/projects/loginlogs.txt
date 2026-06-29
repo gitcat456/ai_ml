@@ -1,0 +1,15 @@
+ 2026-06-22 13:28:54,761 -  DEBUG -  Start of program
+ 2026-06-22 13:29:02,448 -  DEBUG -  username:eqeqw
+ 2026-06-22 13:29:02,448 -  DEBUG -  password:eqweq
+ 2026-06-22 13:31:13,478 -  DEBUG -  Start of program
+ 2026-06-22 13:31:18,648 -  DEBUG -  username:admin
+ 2026-06-22 13:31:18,649 -  DEBUG -  password:admin123
+ 2026-06-22 13:31:18,649 -  DEBUG -  Access Granted
+ 2026-06-22 13:31:28,201 -  DEBUG -  Start of program
+ 2026-06-22 13:31:47,015 -  DEBUG -  username:administrator
+ 2026-06-22 13:31:47,015 -  DEBUG -  password:pycharm345
+ 2026-06-22 13:31:47,016 -  DEBUG -  Access Denied
+ 2026-06-22 13:36:48,732 -  DEBUG -  Start of program
+ 2026-06-22 13:36:57,894 -  DEBUG -  username:oluios
+ 2026-06-22 13:36:57,894 -  DEBUG -  password:23H4
+ 2026-06-22 13:36:57,894 -  DEBUG -  Access Denied
