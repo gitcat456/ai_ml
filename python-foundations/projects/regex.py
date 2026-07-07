@@ -12,7 +12,7 @@ import re
     
 # print(match.group())
 
-test = "The model trained for 150 epochs and achieved 98 accuracy."
+test = "Epoch 150, Accuracy 98, Loss 0.03"
 ex = re.compile(r"\d+")
-ext = ex.search(test)
-print(ext.group())
+ext = ex.findall(test)
+print(ext)
