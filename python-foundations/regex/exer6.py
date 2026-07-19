@@ -1,6 +1,6 @@
 import re 
 
-pattern = re.compile(r"[\w-]+@[A-za-z0-9-]+(\.[A-za-z]{2,})+")
+pattern = re.compile(r"[\w.-]+@[A-Za-z0-9-]+(\.[A-za-z]{2,})+")
 
 while True:
     
