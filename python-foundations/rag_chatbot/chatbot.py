@@ -2,7 +2,7 @@ import os
 import requests
 from dotenv import load_dotenv
 from chunker import load_chunks
-from retriever import retrieve
+from retriever import retrieve, build_index
 
 load_dotenv()
 
@@ -18,16 +18,18 @@ headers = {
 
 messages = []
 
+chunked = load_chunks("notes.txt")
+
+chunks = build_index(chunked)
+
 
 while True:
     
-    chunks = load_chunks("notes.txt")
-
     question = input("You: ")
 
     context = retrieve(question, chunks)
 
-    context_text = "\n\n".join(context)
+    context_text = "\n\n".join([item[1]['text'] for item in context])
 
     #Prompt Augmentation
     prompt = f"""
