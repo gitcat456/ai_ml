@@ -13,3 +13,14 @@ def load_chunks(file_path):
     #     print(chunk)
     #     print("-" * 40)
         
+        
+# chunk_embeddings = []
+
+# for chunk in chunks:
+
+#     embedding = model.encode(chunk)
+
+#     chunk_embeddings.append({
+#         "text": chunk,
+#         "embedding": embedding
+#     })
