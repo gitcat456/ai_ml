@@ -1,41 +1,72 @@
 from embeddings import embed
 from sklearn.metrics.pairwise import cosine_similarity
+import chromadb
+
+client = chromadb.PersistentClient(path="./database")
+
+collection = client.get_or_create_collection(
+    name="anime_stuff"
+)
 
 def build_index(chunks):
-    index = []
 
-    for chunk in chunks:
-        index.append({
-            "text": chunk,
-            "embedding": embed(chunk)
-        })
+    for i, chunk in enumerate(chunks, start=1):
 
-    return index
+        chunk_id = f"chunk_{i}"
 
-def retrieve(question, index, k=3):
-    
-    query_embedding = embed(question)
-    
-    results = []
-    
-    for document in index:
-        score = cosine_similarity(
-            [query_embedding],
-            [document["embedding"]]
-        )[0][0]
-        
-        results.append(
-            (score, document)
+        collection.add(
+            ids=[chunk_id],
+            documents=[chunk],
+            embeddings=[embed(chunk)]
         )
+
+    return collection
+
+    #     index.append({
+    #         "text": chunk,
+    #         "embedding": embed(chunk)
+    #     })
+
+    # return index
     
-    results = sorted(
-        results,
-        reverse=True
+    
+
+def retrieve(question, collection, k=3):
+
+    query_embedding = embed(question)
+
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=k
     )
+
+    return results
+
+
+# def retrieve(question, index, k=3):
     
-    top_results = results[:k]
+#     query_embedding = embed(question)
     
-    return top_results
+#     results = []
+    
+#     for document in index:
+#         score = cosine_similarity(
+#             [query_embedding],
+#             [document["embedding"]]
+#         )[0][0]
+        
+#         results.append(
+#             (score, document)
+#         )
+    
+#     results = sorted(
+#         results,
+#         reverse=True
+#     )
+    
+#     top_results = results[:k]
+    
+#     return top_results
 
 
 
