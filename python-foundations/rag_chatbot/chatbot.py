@@ -29,7 +29,10 @@ while True:
 
     context = retrieve(question, chunks)
 
-    context_text = "\n\n".join([item[1]['text'] for item in context])
+    # context_text = "\n\n".join([item[1]['text'] for item in context])
+    context_text = context_text = "\n\n".join(
+                        context["documents"][0]
+                    )
 
     #Prompt Augmentation
     prompt = f"""
