@@ -18,16 +18,11 @@ headers = {
 
 messages = []
 
-chunked = load_chunks("notes.txt")
-
-chunks = build_index(chunked)
-
-
 while True:
     
     question = input("You: ")
 
-    context = retrieve(question, chunks)
+    context = retrieve(question)
 
     # context_text = "\n\n".join([item[1]['text'] for item in context])
     context_text = context_text = "\n\n".join(
