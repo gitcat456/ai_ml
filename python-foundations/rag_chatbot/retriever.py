@@ -5,7 +5,7 @@ import chromadb
 client = chromadb.PersistentClient(path="./database")
 
 collection = client.get_or_create_collection(
-    name="anime_stuff"
+    name="knowledge_base"
 )
 
 def build_index(chunks):
@@ -31,7 +31,7 @@ def build_index(chunks):
     
     
 
-def retrieve(question, collection, k=3):
+def retrieve(question, k=3):
 
     query_embedding = embed(question)
 
