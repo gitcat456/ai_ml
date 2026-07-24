@@ -8,4 +8,4 @@ print("Embedding model loaded!")
 
 
 def embed(text):
-    return model.encode(text)
+    return model.encode(text).tolist()
