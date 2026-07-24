@@ -1,35 +1,13 @@
-from embeddings import embed
-from sklearn.metrics.pairwise import cosine_similarity
 import chromadb
+from embeddings import embed
 
-client = chromadb.PersistentClient(path="./database")
+client = chromadb.PersistentClient(
+    path="./database"
+)
 
 collection = client.get_or_create_collection(
     name="knowledge_base"
 )
-
-def build_index(chunks):
-
-    for i, chunk in enumerate(chunks, start=1):
-
-        chunk_id = f"chunk_{i}"
-
-        collection.add(
-            ids=[chunk_id],
-            documents=[chunk],
-            embeddings=[embed(chunk)]
-        )
-
-    return collection
-
-    #     index.append({
-    #         "text": chunk,
-    #         "embedding": embed(chunk)
-    #     })
-
-    # return index
-    
-    
 
 def retrieve(question, k=3):
 
@@ -41,6 +19,55 @@ def retrieve(question, k=3):
     )
 
     return results
+
+
+
+
+
+
+# from embeddings import embed
+# from sklearn.metrics.pairwise import cosine_similarity
+# import chromadb
+
+# client = chromadb.PersistentClient(path="./database")
+
+# collection = client.get_or_create_collection(
+#     name="knowledge_base"
+# )
+
+# def build_index(chunks):
+
+#     for i, chunk in enumerate(chunks, start=1):
+
+#         chunk_id = f"chunk_{i}"
+
+#         collection.add(
+#             ids=[chunk_id],
+#             documents=[chunk],
+#             embeddings=[embed(chunk)]
+#         )
+
+#     return collection
+
+#     #     index.append({
+#     #         "text": chunk,
+#     #         "embedding": embed(chunk)
+#     #     })
+
+#     # return index
+    
+    
+
+# def retrieve(question, k=3):
+
+#     query_embedding = embed(question)
+
+#     results = collection.query(
+#         query_embeddings=[query_embedding],
+#         n_results=k
+#     )
+
+#     return results
 
 
 # def retrieve(question, index, k=3):
