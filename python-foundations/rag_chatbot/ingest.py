@@ -12,13 +12,13 @@ from embeddings import embed
 client = chromadb.PersistentClient(path="./database")
 
 collection = client.get_or_create_collection(
-    name="knowledge_base"
+    name="work_stuff"
 )
 
 # Optional: clear old data before rebuilding
-collection.delete(where={})
+ #collection.delete(where={})
 
-documents_folder = "documents"
+documents_folder = "work_stuff"
 
 chunk_counter = 1
 
@@ -54,4 +54,4 @@ for filename in os.listdir(documents_folder):
 
         chunk_counter += 1
 
-print("Knowledge base built successfully!")
+print("work stuff built successfully!")
