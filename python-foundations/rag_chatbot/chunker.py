@@ -1,12 +1,21 @@
-def load_chunks(file_path):
+# def load_chunks(file_path):
     
-    with open(file_path, "r", encoding="utf-8") as file:
-        text = file.read()
+#     with open(file_path, "r", encoding="utf-8") as file:
+#         text = file.read()
         
-    chunks = text.split("\n\n")
+#     chunks = text.split("\n\n")
     
-    return chunks 
+#     return chunks 
 
+def chunk_text(text):
+
+    chunks = text.split("\n\n")
+
+    return [
+        chunk.strip()
+        for chunk in chunks
+        if chunk.strip()
+    ]
 
     # for i, chunk in enumerate(chunks, start=1):
     #     print(f"Chunk {i}")
