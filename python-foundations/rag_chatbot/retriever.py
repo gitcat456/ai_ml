@@ -6,7 +6,7 @@ client = chromadb.PersistentClient(
 )
 
 collection = client.get_or_create_collection(
-    name="knowledge_base"
+    name="work_stuff"
 )
 
 def retrieve(question, k=3):
