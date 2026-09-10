@@ -22,7 +22,7 @@ retriever = index.as_retriever(
     similarity_top_k=3
 )
 
-query_engine = index.as_query_engine(
+chat_engine = index.as_chat_engine(
     similarity_top_k=3
 )
 
@@ -47,7 +47,7 @@ while True:
         print("Page:", node.metadata.get("page_label"))
         print(node.text[:300])
 
-        response = query_engine.query(question)
+        response = chat_engine.chat(question)
 
     print("\n--- Answer ---")
     print(response)  
