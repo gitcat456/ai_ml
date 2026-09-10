@@ -1,19 +1,36 @@
-from llama_index.core import SimpleDirectoryReader
-from llama_index.readers.file import PDFReader
+from llama_index.core import (
+    StorageContext,
+    load_index_from_storage
+)
+
+import settings
 
 
-reader = PDFReader()
+print("Loading existing index...")
 
-documents = SimpleDirectoryReader(
-    "documents",
-    file_extractor={
-        ".pdf": reader
-    }
-).load_data()
+storage_context = StorageContext.from_defaults(
+    persist_dir="./storage"
+)
 
-for i, doc in enumerate(documents):
-    print("="*50)
-    print("DOCUMENT:", i)
-    print(doc.metadata["file_name"])
-    print(doc.metadata.get("page_label"))
-    print(doc.text[:100])
+index = load_index_from_storage(
+    storage_context
+)
+
+print("Index loaded!")
+
+
+query_engine = index.as_query_engine()
+
+
+while True:
+
+    question = input("\nYou: ")
+
+    if question.lower() in ["quit", "exit", "bye"]:
+        print("Goodbye!")
+        break
+
+
+    response = query_engine.query(question)
+
+    print("\nAssistant:", response)
