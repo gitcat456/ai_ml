@@ -1,0 +1,25 @@
+# Virtual environments
+venv/
+
+.venv/
+
+env/
+
+.env/
+
+.env
+
+env
+
+.database
+database/
+
+__pycache__/
+.pycache
+
+documents/
+
+work_stuff/
+
+storage/
+
