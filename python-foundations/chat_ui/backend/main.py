@@ -17,4 +17,4 @@ def chat(message: str):
 
     return {
         "answer": str(response)
-    }
+    } 
