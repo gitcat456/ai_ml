@@ -23,6 +23,7 @@ retriever = index.as_retriever(
 )
 
 chat_engine = index.as_chat_engine(
+    chat_mode="context",
     similarity_top_k=3
 )
 
@@ -37,9 +38,7 @@ while True:
     
     # metadata and real source attribution
     nodes = retriever.retrieve(question)
-
     print("\n--- Retrieved Sources ---")
-
     for i, node in enumerate(nodes, start=1):
         print(f"\n--- RESULT {i} ---")
         print("Score:", node.score)
@@ -47,7 +46,7 @@ while True:
         print("Page:", node.metadata.get("page_label"))
         print(node.text[:300])
 
-        response = chat_engine.chat(question)
+    response = chat_engine.chat(question)
 
     print("\n--- Answer ---")
     print(response)  
