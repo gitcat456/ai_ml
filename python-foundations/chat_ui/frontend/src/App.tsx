@@ -1,4 +1,7 @@
 import { useState } from "react";
+import "./App.css";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Source {
   file: string | null;
@@ -11,10 +14,15 @@ interface ChatResponse {
   sources: Source[];
 }
 
+interface Message {
+  role: "user" | "assistant";
+  content: string;
+  sources?: Source[];
+}
+
 function App() {
   const [message, setMessage] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [sources, setSources] = useState<Source[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
 
   async function sendMessage() {
@@ -22,6 +30,13 @@ function App() {
       return;
     }
 
+    const userMessage: Message = {
+      role: "user",
+      content: message,
+    };
+
+    setMessages((previous) => [...previous, userMessage]);
+    setMessage("");
     setLoading(true);
 
     try {
@@ -41,50 +56,128 @@ function App() {
 
       const data: ChatResponse = await response.json();
 
-      setAnswer(data.answer);
-      setSources(data.sources);
+      const assistantMessage: Message = {
+        role: "assistant",
+        content: data.answer,
+        sources: data.sources,
+      };
+
+      setMessages((previous) => [...previous, assistantMessage]);
     } catch (error) {
       console.error(error);
-      setAnswer("Something went wrong while contacting the backend.");
-      setSources([]);
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: "Something went wrong while contacting the backend.",
+        },
+      ]);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <main>
-      <h1>RAG Chat</h1>
+    <div className="app">
+      <header className="header">
+        <div>
+          <h1>RAG Assistant</h1>
+          <p>Ask questions about your documents</p>
+        </div>
+      </header>
 
-      <div>
-        <textarea
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          placeholder="Ask something..."
-        />
+      <main className="chat-container">
+        <div className="messages">
+          {messages.length === 0 && (
+            <div className="welcome">
+              <h2>How can I help?</h2>
+              <p>
+                Ask me something about the documents in my knowledge base.
+              </p>
+            </div>
+          )}
 
-        <button onClick={sendMessage} disabled={loading}>
-          {loading ? "Thinking..." : "Send"}
-        </button>
-      </div>
+          {messages.map((msg, index) => (
+            <div
+              key={index}
+              className={`message-row ${msg.role}`}
+            >
+              <div className="message">
+                <div className="message-label">
+                  {msg.role === "user" ? "You" : "Assistant"}
+                </div>
 
-      {answer && (
-        <section>
-          <h2>Answer</h2>
-          <p>{answer}</p>
+             <div className="message-content">
+                {msg.role === "assistant" ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.content}
+                  </ReactMarkdown>
+                ) : (
+                  msg.content
+                )}
+            </div>
 
-          <h3>Sources</h3>
+                {msg.sources && msg.sources.length > 0 && (
+                  <div className="sources">
+                    <div className="sources-title">Sources</div>
 
-          {sources.map((source, index) => (
-            <div key={index}>
-              <strong>{source.file}</strong>
-              <div>Page: {source.page}</div>
-              <div>Score: {source.score?.toFixed(3)}</div>
+                    {msg.sources.map((source, sourceIndex) => (
+                      <div className="source" key={sourceIndex}>
+                        <span className="source-file">
+                          {source.file}
+                        </span>
+
+                        <span>
+                          Page {source.page}
+                        </span>
+
+                        <span>
+                          Score {source.score?.toFixed(3)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           ))}
-        </section>
-      )}
-    </main>
+
+          {loading && (
+            <div className="message-row assistant">
+              <div className="message">
+                <div className="message-label">Assistant</div>
+                <div className="typing">
+                  Thinking...
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="input-area">
+          <textarea
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+              }
+            }}
+            placeholder="Ask something..."
+            rows={1}
+          />
+
+          <button
+            onClick={sendMessage}
+            disabled={loading || !message.trim()}
+          >
+            Send
+          </button>
+        </div>
+      </main>
+    </div>
   );
 }
 
