@@ -23,4 +23,17 @@ class RAGService:
         )
 
     def chat(self, message):
-        return self.chat_engine.chat(message)
+        response = self.chat_engine.chat(message)
+        sources = []
+        
+        for node in response.source_nodes:
+            sources.append({
+                "file": node.metadata.get("file_name"),
+                "page": node.metadata.get("page_label"),
+                "score": node.score,
+            })
+            
+        return {
+            "answer": str(response),
+            "sources": sources,
+        }
