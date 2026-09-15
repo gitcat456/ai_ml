@@ -19,6 +19,7 @@ app.add_middleware(
 rag = RAGService()
 
 class ChatRequest(BaseModel):
+    session_id: str
     message: str
 
 
@@ -29,6 +30,6 @@ def root():
 
 @app.post("/api/chat")
 def chat(request: ChatRequest):
-    response = rag.chat(request.message)
+    response = rag.chat(request.session_id, request.message)
 
     return response
