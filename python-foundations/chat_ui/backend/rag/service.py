@@ -2,7 +2,10 @@ from llama_index.core import (
     StorageContext,
     load_index_from_storage,
 )
-from llama_index.core.postprocessor import SentenceTransformerRerank
+from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.core.postprocessor import (
+    SentenceTransformerRerank,
+)
 
 import settings
 
@@ -23,69 +26,38 @@ class RAGService:
             top_n=3,
         )
 
-        self.retriever = self.index.as_retriever(
-            similarity_top_k=8
-        )
-
-        self.chat_engine = self.index.as_chat_engine(
-            chat_mode="context",
-            similarity_top_k=8,
-            node_postprocessors=[
-                self.reranker
-            ],
-        )
-
         self.relevance_threshold = -3.0
 
-    def chat(self, message):
+        self.sessions = {}
 
-        nodes = self.retriever.retrieve(
-            message
-        )
+    def get_chat_engine(self, session_id):
 
-        reranked_nodes = self.reranker.postprocess_nodes(
-            nodes,
-            query_str=message,
-        )
-        
-        print("\nRERANKED RESULTS")
+        if session_id not in self.sessions:
 
-        for node in reranked_nodes:
-            print(
-                "Score:",
-                node.score,
-                "| File:",
-                node.metadata.get("file_name"),
-                "| Page:",
-                node.metadata.get("page_label"),
+            memory = ChatMemoryBuffer.from_defaults(
+                token_limit=4000
             )
 
-        if not reranked_nodes:
-            return {
-                "answer": (
-                    "I don't have enough information "
-                    "in the knowledge base to answer "
-                    "that question."
-                ),
-                "sources": [],
-            }
+            chat_engine = self.index.as_chat_engine(
+                chat_mode="condense_plus_context",
+                memory=memory,
+                similarity_top_k=8,
+                node_postprocessors=[
+                    self.reranker
+                ],
+            )
 
-        best_score = reranked_nodes[0].score
+            self.sessions[session_id] = chat_engine
 
-        if (
-            best_score is None
-            or best_score < self.relevance_threshold
-        ):
-            return {
-                "answer": (
-                    "I don't have enough information "
-                    "in the knowledge base to answer "
-                    "that question."
-                ),
-                "sources": [],
-            }
+        return self.sessions[session_id]
 
-        response = self.chat_engine.chat(
+    def chat(self, session_id, message):
+
+        chat_engine = self.get_chat_engine(
+            session_id
+        )
+
+        response = chat_engine.chat(
             message
         )
 
@@ -110,3 +82,8 @@ class RAGService:
             "answer": str(response),
             "sources": sources,
         }
+
+    def clear_session(self, session_id):
+
+        if session_id in self.sessions:
+            del self.sessions[session_id]
