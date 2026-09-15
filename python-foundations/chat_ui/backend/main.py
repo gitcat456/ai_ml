@@ -1,9 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from rag.service import RAGService
+from pathlib import Path
 
 app = FastAPI()
+
+
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,3 +38,20 @@ def chat(request: ChatRequest):
     response = rag.chat(request.session_id, request.message)
 
     return response
+
+@app.post("/api/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    if file.content_type != "application/pdf":
+        return {
+            "error": "Only PDF files are allowed."
+        }
+
+    file_path = UPLOAD_DIR / file.filename
+
+    with open(file_path, "wb") as buffer:
+        buffer.write(await file.read())
+
+    return {
+        "message": "Document uploaded successfully.",
+        "filename": file.filename,
+    }
