@@ -57,3 +57,18 @@ async def upload_document(file: UploadFile = File(...)):
         "message": "Document uploaded and indexed successfully.",
         "filename": file.filename,
     }
+    
+@app.get("/api/documents")
+def list_documents():
+    documents = []
+
+    for file_path in UPLOAD_DIR.iterdir():
+        if file_path.is_file() and file_path.suffix.lower() == ".pdf":
+            documents.append({
+                "filename": file_path.name,
+                "size": file_path.stat().st_size,
+            })
+
+    return {
+        "documents": documents
+    }
