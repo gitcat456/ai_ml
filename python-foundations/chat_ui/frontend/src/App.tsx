@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
@@ -18,6 +22,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
+  timestamp: Date;
 }
 
 function App() {
@@ -25,7 +30,11 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef =
+    useRef<HTMLDivElement | null>(null);
+
+  const textareaRef =
+    useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
@@ -33,41 +42,78 @@ function App() {
     });
   }, [messages, loading]);
 
+  useEffect(() => {
+    const textarea = textareaRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(
+      textarea.scrollHeight,
+      160
+    )}px`;
+  }, [message]);
+
+  function startNewChat() {
+    if (loading) {
+      return;
+    }
+
+    setMessages([]);
+    setMessage("");
+  }
+
   async function sendMessage() {
     if (!message.trim() || loading) {
       return;
     }
 
+    const currentMessage = message.trim();
+
     const userMessage: Message = {
       role: "user",
-      content: message,
+      content: currentMessage,
+      timestamp: new Date(),
     };
 
-    setMessages((previous) => [...previous, userMessage]);
+    setMessages((previous) => [
+      ...previous,
+      userMessage,
+    ]);
+
     setMessage("");
     setLoading(true);
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: message,
-        }),
-      });
+      const response = await fetch(
+        "http://127.0.0.1:8000/api/chat",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message: currentMessage,
+          }),
+        }
+      );
 
       if (!response.ok) {
-        throw new Error("Failed to get response");
+        throw new Error(
+          `Request failed: ${response.status}`
+        );
       }
 
-      const data: ChatResponse = await response.json();
+      const data: ChatResponse =
+        await response.json();
 
       const assistantMessage: Message = {
         role: "assistant",
         content: data.answer,
         sources: data.sources,
+        timestamp: new Date(),
       };
 
       setMessages((previous) => [
@@ -80,7 +126,8 @@ function App() {
       const errorMessage: Message = {
         role: "assistant",
         content:
-          "Something went wrong while contacting the backend.",
+          "Sorry, something went wrong while contacting the backend. Please try again.",
+        timestamp: new Date(),
       };
 
       setMessages((previous) => [
@@ -92,15 +139,53 @@ function App() {
     }
   }
 
+  function handleKeyDown(
+    event: React.KeyboardEvent<HTMLTextAreaElement>
+  ) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey
+    ) {
+      event.preventDefault();
+      sendMessage();
+    }
+  }
+
+  function formatTime(date: Date) {
+    return date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
   return (
     <div className="app">
       <header className="header">
-        <div>
-          <h1>RAG Assistant</h1>
+        <div className="header-content">
+          <div className="brand">
+            <div className="brand-icon">
+              AI
+            </div>
 
-          <p>
-            Ask questions about your documents
-          </p>
+            <div>
+              <h1>RAG Assistant</h1>
+
+              <p>
+                Your document knowledge assistant
+              </p>
+            </div>
+          </div>
+
+          <button
+            className="new-chat-button"
+            onClick={startNewChat}
+            disabled={
+              loading || messages.length === 0
+            }
+          >
+            <span>＋</span>
+            New Chat
+          </button>
         </div>
       </header>
 
@@ -109,12 +194,50 @@ function App() {
 
           {messages.length === 0 && (
             <div className="welcome">
-              <h2>How can I help?</h2>
+              <div className="welcome-icon">
+                ✦
+              </div>
+
+              <h2>
+                How can I help you?
+              </h2>
 
               <p>
-                Ask me something about the documents
-                in my knowledge base.
+                Ask questions about the documents
+                in your knowledge base.
               </p>
+
+              <div className="suggestions">
+                <button
+                  onClick={() =>
+                    setMessage(
+                      "Who is Denzel Okoth?"
+                    )
+                  }
+                >
+                  Who is Denzel Okoth?
+                </button>
+
+                <button
+                  onClick={() =>
+                    setMessage(
+                      "What information is available in the documents?"
+                    )
+                  }
+                >
+                  What information is available?
+                </button>
+
+                <button
+                  onClick={() =>
+                    setMessage(
+                      "Summarize the main topics in the documents."
+                    )
+                  }
+                >
+                  Summarize the documents
+                </button>
+              </div>
             </div>
           )}
 
@@ -125,21 +248,32 @@ function App() {
             >
               <div className="message">
 
-                <div className="message-label">
-                  {msg.role === "user"
-                    ? "You"
-                    : "Assistant"}
+                <div className="message-header">
+                  <span className="message-label">
+                    {msg.role === "user"
+                      ? "You"
+                      : "Assistant"}
+                  </span>
+
+                  <span className="message-time">
+                    {formatTime(
+                      msg.timestamp
+                    )}
+                  </span>
                 </div>
 
                 <div className="message-content">
-                  {msg.role === "assistant" ? (
+                  {msg.role ===
+                  "assistant" ? (
                     <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
+                      remarkPlugins={[
+                        remarkGfm,
+                      ]}
                     >
                       {msg.content}
                     </ReactMarkdown>
                   ) : (
-                    msg.content
+                    <p>{msg.content}</p>
                   )}
                 </div>
 
@@ -147,30 +281,55 @@ function App() {
                   msg.sources.length > 0 && (
                     <div className="sources">
                       <div className="sources-title">
-                        Sources
+                        <span>Sources</span>
+
+                        <span className="sources-count">
+                          {msg.sources.length}
+                        </span>
                       </div>
 
-                      {msg.sources.map(
-                        (source, sourceIndex) => (
-                          <div
-                            className="source"
-                            key={sourceIndex}
-                          >
-                            <span className="source-file">
-                              {source.file}
-                            </span>
+                      <div className="source-list">
+                        {msg.sources.map(
+                          (
+                            source,
+                            sourceIndex
+                          ) => (
+                            <div
+                              className="source-card"
+                              key={sourceIndex}
+                            >
+                              <div className="source-icon">
+                                📄
+                              </div>
 
-                            <span>
-                              Page {source.page}
-                            </span>
+                              <div className="source-info">
+                                <div className="source-file">
+                                  {source.file ||
+                                    "Unknown document"}
+                                </div>
 
-                            <span>
-                              Score{" "}
-                              {source.score?.toFixed(3)}
-                            </span>
-                          </div>
-                        )
-                      )}
+                                <div className="source-meta">
+                                  <span>
+                                    Page{" "}
+                                    {source.page ||
+                                      "—"}
+                                  </span>
+
+                                  {source.score !==
+                                    null && (
+                                    <span>
+                                      Relevance{" "}
+                                      {source.score.toFixed(
+                                        3
+                                      )}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        )}
+                      </div>
                     </div>
                   )}
               </div>
@@ -181,12 +340,16 @@ function App() {
             <div className="message-row assistant">
               <div className="message">
 
-                <div className="message-label">
-                  Assistant
+                <div className="message-header">
+                  <span className="message-label">
+                    Assistant
+                  </span>
                 </div>
 
                 <div className="typing">
-                  Thinking...
+                  <span></span>
+                  <span></span>
+                  <span></span>
                 </div>
 
               </div>
@@ -197,33 +360,50 @@ function App() {
 
         </div>
 
-        <div className="input-area">
-          <textarea
-            value={message}
-            onChange={(event) =>
-              setMessage(event.target.value)
-            }
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey
-              ) {
-                event.preventDefault();
-                sendMessage();
-              }
-            }}
-            placeholder="Ask something..."
-            rows={1}
-          />
+        <div className="input-wrapper">
+          <div className="input-area">
 
-          <button
-            onClick={sendMessage}
-            disabled={
-              loading || !message.trim()
-            }
-          >
-            {loading ? "Thinking..." : "Send"}
-          </button>
+            <textarea
+              ref={textareaRef}
+              value={message}
+              onChange={(event) =>
+                setMessage(
+                  event.target.value
+                )
+              }
+              onKeyDown={handleKeyDown}
+              placeholder="Ask something..."
+              rows={1}
+              disabled={loading}
+            />
+
+            <button
+              className="send-button"
+              onClick={sendMessage}
+              disabled={
+                loading ||
+                !message.trim()
+              }
+              aria-label="Send message"
+            >
+              {loading ? (
+                <span className="spinner"></span>
+              ) : (
+                <span>↑</span>
+              )}
+            </button>
+
+          </div>
+
+          <div className="input-hint">
+            <span>
+              Enter to send
+            </span>
+
+            <span>
+              Shift + Enter for new line
+            </span>
+          </div>
         </div>
       </main>
     </div>
