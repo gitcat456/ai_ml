@@ -51,7 +51,9 @@ async def upload_document(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
 
+    rag.ingest_document(str(file_path))
+
     return {
-        "message": "Document uploaded successfully.",
+        "message": "Document uploaded and indexed successfully.",
         "filename": file.filename,
     }
