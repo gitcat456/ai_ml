@@ -72,3 +72,26 @@ def list_documents():
     return {
         "documents": documents
     }
+    
+@app.delete("/api/documents/{filename}")
+def delete_document(filename: str):
+    file_path = UPLOAD_DIR / filename
+
+    if not file_path.exists():
+        return {
+            "error": "Document not found."
+        }
+
+    deleted = rag.delete_document(filename)
+
+    if not deleted:
+        return {
+            "error": "Document is not indexed."
+        }
+
+    file_path.unlink()
+
+    return {
+        "message": "Document deleted successfully.",
+        "filename": filename,
+    }
