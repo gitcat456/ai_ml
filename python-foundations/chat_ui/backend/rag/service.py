@@ -1,3 +1,7 @@
+from pathlib import Path
+from llama_index.core import SimpleDirectoryReader
+from llama_index.core.node_parser import SentenceSplitter
+
 from llama_index.core import (
     StorageContext,
     load_index_from_storage,
@@ -26,9 +30,36 @@ class RAGService:
             top_n=3,
         )
 
-        self.relevance_threshold = -3.0
+        self.relevance_threshold = -5.0
 
         self.sessions = {}
+        
+    def ingest_document(self, file_path: str):
+        documents = SimpleDirectoryReader(
+            input_files=[file_path]
+        ).load_data()
+
+        for document in documents:
+            document.metadata["file_name"] = Path(
+                file_path
+            ).name
+
+        splitter = SentenceSplitter(
+            chunk_size=512,
+            chunk_overlap=50,
+        )
+
+        nodes = splitter.get_nodes_from_documents(
+            documents
+        )
+        #add knowledge to the existing index
+        self.index.insert_nodes(nodes)
+
+        self.index.storage_context.persist(
+            persist_dir="../../rag_chatbot_llamaindex/storage"
+        )
+
+        self.sessions.clear()
 
     def get_chat_engine(self, session_id):
 
@@ -41,12 +72,12 @@ class RAGService:
             chat_engine = self.index.as_chat_engine(
                 chat_mode="condense_plus_context",
                 memory=memory,
-                similarity_top_k=8,
+                similarity_top_k=5,
                 node_postprocessors=[
                     self.reranker
                 ],
             )
-
+           #temporary in-memory session store
             self.sessions[session_id] = chat_engine
 
         return self.sessions[session_id]
@@ -60,6 +91,31 @@ class RAGService:
         response = chat_engine.chat(
             message
         )
+
+        if not response.source_nodes:
+            return {
+                "answer": (
+                    "I don't have enough information "
+                    "in the knowledge base to answer "
+                    "that question."
+                ),
+                "sources": [],
+            }
+
+        best_score = response.source_nodes[0].score
+
+        if (
+            best_score is None
+            or float(best_score) < self.relevance_threshold
+        ):
+            return {
+                "answer": (
+                    "I don't have enough information "
+                    "in the knowledge base to answer "
+                    "that question."
+                ),
+                "sources": [],
+            }
 
         sources = []
 
@@ -82,8 +138,29 @@ class RAGService:
             "answer": str(response),
             "sources": sources,
         }
+        
+    def delete_document(self, filename: str):
+        docstore = self.index.docstore
 
-    def clear_session(self, session_id):
+        node_ids_to_delete = []
 
-        if session_id in self.sessions:
-            del self.sessions[session_id]
+        for node_id, node in docstore.docs.items():
+            if node.metadata.get("file_name") == filename:
+                node_ids_to_delete.append(node_id)
+
+        if not node_ids_to_delete:
+            return False
+
+        for node_id in node_ids_to_delete:
+            self.index.delete_nodes(
+                [node_id],
+                delete_from_docstore=True,
+            )
+
+        self.index.storage_context.persist(
+            persist_dir="../../rag_chatbot_llamaindex/storage"
+        )
+
+        self.sessions.clear()
+
+        return True
