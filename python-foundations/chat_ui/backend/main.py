@@ -8,7 +8,6 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -93,17 +92,20 @@ def register(
         "role": user.role,
     }
 
-
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    
+@app.post("/api/auth/login")
 @app.post("/api/auth/login")
 def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    request: LoginRequest,
     db: Session = Depends(database.get_db),
 ):
     user = (
         db.query(models.User)
         .filter(
-            models.User.username
-            == form_data.username
+            models.User.username == request.username
         )
         .first()
     )
@@ -115,7 +117,7 @@ def login(
         )
 
     if not verify_password(
-        form_data.password,
+        request.password,
         user.hashed_password,
     ):
         raise HTTPException(
