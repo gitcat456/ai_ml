@@ -7,6 +7,10 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
 
+function createSessionId() {
+  return crypto.randomUUID();
+}
+
 interface Source {
   file: string | null;
   page: string | null;
@@ -29,6 +33,9 @@ function App() {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [sessionId, setSessionId] = useState(
+  createSessionId()
+   );
 
   const messagesEndRef =
     useRef<HTMLDivElement | null>(null);
@@ -63,6 +70,7 @@ function App() {
 
     setMessages([]);
     setMessage("");
+    setSessionId(createSessionId());
   }
 
   async function sendMessage() {
@@ -95,6 +103,7 @@ function App() {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
+            session_id: sessionId,
             message: currentMessage,
           }),
         }
