@@ -7,7 +7,6 @@ interface DocumentItem {
   size: number;
   uploaded_at: string;
 }
-
 interface AdminDocumentsProps {
   token: string;
 }
@@ -37,44 +36,50 @@ function AdminDocuments({
     useState<File | null>(null);
 
 
-  async function loadDocuments() {
-    setLoading(true);
-    setError("");
+async function loadDocuments() {
+  setLoading(true);
+  setError("");
 
-    try {
-      const response = await fetch(
-        `${API_URL}/api/documents`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
-
-      if (!response.ok) {
-        const data =
-          await response.json();
-
-        throw new Error(
-          data.detail ||
-            "Failed to load documents."
-        );
+  try {
+    const response = await fetch(
+      `${API_URL}/api/documents`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       }
+    );
 
+    if (!response.ok) {
       const data =
         await response.json();
 
-      setDocuments(data);
-    } catch (error) {
-      setError(
-        error instanceof Error
-          ? error.message
-          : "Failed to load documents."
+      throw new Error(
+        data.detail ||
+          "Failed to load documents."
       );
-    } finally {
-      setLoading(false);
     }
+
+    const data =
+      await response.json();
+
+    setDocuments(
+      Array.isArray(data)
+        ? data
+        : data.documents ?? []
+    );
+  } catch (error) {
+    setError(
+      error instanceof Error
+        ? error.message
+        : "Failed to load documents."
+    );
+
+    setDocuments([]);
+  } finally {
+    setLoading(false);
   }
+}
 
 
   useEffect(() => {
