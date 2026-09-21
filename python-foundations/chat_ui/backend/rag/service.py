@@ -34,32 +34,69 @@ class RAGService:
 
         self.sessions = {}
         
+
     def ingest_document(self, file_path: str):
+        from pathlib import Path
+
+        from llama_index.core import (
+            SimpleDirectoryReader,
+        )
+        from llama_index.core.node_parser import (
+            SentenceSplitter,
+        )
+
         documents = SimpleDirectoryReader(
             input_files=[file_path]
         ).load_data()
 
+        if not documents:
+            raise ValueError(
+                "No readable content was found in the document."
+            )
+
+
         for document in documents:
-            document.metadata["file_name"] = Path(
-                file_path
-            ).name
+            document.metadata["file_name"] = (
+                Path(file_path).name
+            )
+
 
         splitter = SentenceSplitter(
             chunk_size=512,
             chunk_overlap=50,
         )
 
+
         nodes = splitter.get_nodes_from_documents(
             documents
         )
-        #add knowledge to the existing index
-        self.index.insert_nodes(nodes)
+
+
+        if not nodes:
+            raise ValueError(
+                "No readable text could be extracted from the PDF."
+            )
+
+
+        self.index.insert_nodes(
+            nodes
+        )
+
 
         self.index.storage_context.persist(
             persist_dir="../../rag_chatbot_llamaindex/storage"
         )
 
+
         self.sessions.clear()
+
+
+        return {
+            "documents": len(documents),
+            "nodes": len(nodes),
+        }
+
+
 
     def get_chat_engine(self, session_id):
 
