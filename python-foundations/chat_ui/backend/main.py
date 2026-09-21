@@ -1,3 +1,5 @@
+
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import (
@@ -9,6 +11,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pypdf import PdfReader
 from sqlalchemy.orm import Session
 
 import database
@@ -16,17 +19,30 @@ import models
 
 from auth import (
     create_access_token,
+    get_current_user,
     hash_password,
+    require_admin,
     verify_password,
 )
+
 from rag.service import RAGService
 
+
+# -------------------------
+# Database
+# -------------------------
 
 database.Base.metadata.create_all(
     bind=database.engine
 )
 
+
+# -------------------------
+# FastAPI
+# -------------------------
+
 app = FastAPI()
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,8 +56,16 @@ app.add_middleware(
 )
 
 
+# -------------------------
+# RAG
+# -------------------------
+
 rag = RAGService()
 
+
+# -------------------------
+# Uploads
+# -------------------------
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -50,10 +74,12 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # -------------------------
 # Authentication
 # -------------------------
+
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    
+
+
 @app.post("/api/auth/register")
 def register(
     request: RegisterRequest,
@@ -92,11 +118,12 @@ def register(
         "role": user.role,
     }
 
+
 class LoginRequest(BaseModel):
     username: str
     password: str
-    
-@app.post("/api/auth/login")
+
+
 @app.post("/api/auth/login")
 def login(
     request: LoginRequest,
@@ -139,6 +166,19 @@ def login(
     }
 
 
+@app.get("/api/auth/me")
+def get_me(
+    current_user: models.User = Depends(
+        get_current_user
+    ),
+):
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "role": current_user.role,
+    }
+
+
 # -------------------------
 # General
 # -------------------------
@@ -160,7 +200,12 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest,
+    current_user: models.User = Depends(
+        get_current_user
+    ),
+):
     response = rag.chat(
         request.session_id,
         request.message,
@@ -175,33 +220,165 @@ def chat(request: ChatRequest):
 
 @app.post("/api/documents/upload")
 async def upload_document(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(
+        require_admin
+    ),
 ):
-    if file.content_type != "application/pdf":
+    # ---------------------------------
+    # 1. Validate filename
+    # ---------------------------------
+
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="A filename is required.",
+        )
+
+    filename = Path(
+        file.filename
+    ).name
+
+    if not filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are allowed.",
         )
 
-    file_path = UPLOAD_DIR / file.filename
 
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
+    # ---------------------------------
+    # 2. Read the uploaded file
+    # ---------------------------------
 
-    rag.ingest_document(
-        str(file_path)
+    file_content = await file.read()
+
+    if not file_content:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is empty.",
+        )
+
+
+    # ---------------------------------
+    # 3. Validate the actual PDF
+    # ---------------------------------
+    #
+    # MIME type is not enough.
+    # We check the actual file contents.
+
+    if not file_content.startswith(
+        b"%PDF-"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The uploaded file is not a valid PDF. "
+                "The file may have a .pdf extension but "
+                "does not contain a valid PDF document."
+            ),
+        )
+
+
+    # ---------------------------------
+    # 4. Try parsing the PDF
+    # ---------------------------------
+
+    try:
+        reader = PdfReader(
+            BytesIO(file_content)
+        )
+
+        if len(reader.pages) == 0:
+            raise ValueError(
+                "PDF contains no pages."
+            )
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The uploaded PDF could not be read. "
+                "Please upload a valid, uncorrupted PDF."
+            ),
+        ) from error
+
+
+    # ---------------------------------
+    # 5. Save the file
+    # ---------------------------------
+
+    file_path = (
+        UPLOAD_DIR / filename
     )
+
+    try:
+        with open(
+            file_path,
+            "wb",
+        ) as buffer:
+            buffer.write(file_content)
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save the uploaded document.",
+        ) from error
+
+
+    # ---------------------------------
+    # 6. Index the document
+    # ---------------------------------
+
+    try:
+        ingestion_result = (
+            rag.ingest_document(
+                str(file_path)
+            )
+        )
+
+    except Exception as error:
+        # If indexing fails, remove the file
+        # so we don't leave a document that
+        # exists on disk but isn't in the index.
+
+        if file_path.exists():
+            file_path.unlink()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "The PDF was valid, but the document "
+                "could not be indexed."
+            ),
+        ) from error
+
+
+    # ---------------------------------
+    # 7. Success
+    # ---------------------------------
 
     return {
         "message": (
             "Document uploaded and indexed successfully."
         ),
-        "filename": file.filename,
+        "filename": filename,
+        "documents": ingestion_result.get(
+            "documents",
+            0,
+        ),
+        "nodes": ingestion_result.get(
+            "nodes",
+            0,
+        ),
     }
 
 
 @app.get("/api/documents")
-def list_documents():
+def list_documents(
+    current_user: models.User = Depends(
+        require_admin
+    ),
+):
     documents = []
 
     for file_path in UPLOAD_DIR.iterdir():
@@ -222,8 +399,19 @@ def list_documents():
 
 
 @app.delete("/api/documents/{filename}")
-def delete_document(filename: str):
-    file_path = UPLOAD_DIR / filename
+def delete_document(
+    filename: str,
+    current_user: models.User = Depends(
+        require_admin
+    ),
+):
+    filename = Path(
+        filename
+    ).name
+
+    file_path = (
+        UPLOAD_DIR / filename
+    )
 
     if not file_path.exists():
         raise HTTPException(
@@ -247,3 +435,37 @@ def delete_document(filename: str):
         "message": "Document deleted successfully.",
         "filename": filename,
     }
+
+
+# -------------------------
+# Development
+# -------------------------
+
+@app.patch("/api/dev/make-admin/{username}")
+def make_admin(
+    username: str,
+    db: Session = Depends(database.get_db),
+):
+    user = (
+        db.query(models.User)
+        .filter(
+            models.User.username == username
+        )
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found.",
+        )
+
+    user.role = "admin"
+    db.commit()
+
+    return {
+        "message": "User promoted to admin.",
+        "username": user.username,
+        "role": user.role,
+    }
+
