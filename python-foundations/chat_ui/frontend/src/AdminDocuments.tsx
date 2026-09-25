@@ -1,128 +1,166 @@
+
 import { useEffect, useState } from "react";
 
-const API_URL = "http://127.0.0.1:8000";
-
-interface DocumentItem {
+interface Document {
+  id: number;
   filename: string;
   size: number;
-  uploaded_at: string;
+  pages: number;
+  chunks: number;
+  status: "indexing" | "indexed" | "failed";
+  error: string | null;
+  uploaded_at: string | null;
 }
+
 interface AdminDocumentsProps {
   token: string;
 }
 
-function AdminDocuments({
+const API_URL = "http://127.0.0.1:8000";
+
+export default function AdminDocuments({
   token,
 }: AdminDocumentsProps) {
-  const [documents, setDocuments] =
-    useState<DocumentItem[]>([]);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [selectedFile, setSelectedFile] = useState<File | null>(
+    null
+  );
 
-  const [loading, setLoading] =
-    useState(true);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(
+    null
+  );
 
-  const [uploading, setUploading] =
-    useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
 
-  const [deleting, setDeleting] =
-    useState<string | null>(null);
+  // -------------------------
+  // Helpers
+  // -------------------------
 
-  const [error, setError] =
-    useState("");
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return "0 Bytes";
 
-  const [success, setSuccess] =
-    useState("");
-
-  const [selectedFile, setSelectedFile] =
-    useState<File | null>(null);
-
-
-async function loadDocuments() {
-  setLoading(true);
-  setError("");
-
-  try {
-    const response = await fetch(
-      `${API_URL}/api/documents`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+    const units = ["Bytes", "KB", "MB", "GB"];
+    const index = Math.floor(
+      Math.log(bytes) / Math.log(1024)
     );
 
-    if (!response.ok) {
-      const data =
-        await response.json();
+    const size = bytes / Math.pow(1024, index);
 
-      throw new Error(
-        data.detail ||
-          "Failed to load documents."
-      );
+    return `${size.toFixed(index === 0 ? 0 : 2)} ${
+      units[index]
+    }`;
+  };
+
+  const formatDate = (
+    dateString: string | null
+  ): string => {
+    if (!dateString) return "Unknown date";
+
+    const date = new Date(dateString);
+
+    if (Number.isNaN(date.getTime())) {
+      return "Unknown date";
     }
 
-    const data =
-      await response.json();
+    return date.toLocaleString();
+  };
 
-    setDocuments(
-      Array.isArray(data)
+  const getErrorMessage = async (
+    response: Response
+  ): Promise<string> => {
+    try {
+      const data = await response.json();
+
+      if (typeof data.detail === "string") {
+        return data.detail;
+      }
+
+      return "An unexpected error occurred.";
+    } catch {
+      return "An unexpected error occurred.";
+    }
+  };
+
+  // -------------------------
+  // Fetch documents
+  // -------------------------
+
+  const fetchDocuments = async () => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/api/documents`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          await getErrorMessage(response)
+        );
+      }
+
+      const data = await response.json();
+
+      // Backend returns:
+      // { documents: [...] }
+      //
+      // Also accept a raw array for compatibility.
+
+      const documentList: Document[] = Array.isArray(
+        data
+      )
         ? data
-        : data.documents ?? []
-    );
-  } catch (error) {
-    setError(
-      error instanceof Error
-        ? error.message
-        : "Failed to load documents."
-    );
+        : Array.isArray(data.documents)
+        ? data.documents
+        : [];
 
-    setDocuments([]);
-  } finally {
-    setLoading(false);
-  }
-}
+      setDocuments(documentList);
+    } catch (err) {
+      setDocuments([]);
 
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load documents."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch documents when component mounts
+  // or when the authentication token changes.
 
   useEffect(() => {
-    loadDocuments();
+    fetchDocuments();
   }, [token]);
 
+  // -------------------------
+  // Upload document
+  // -------------------------
 
-  function handleFileChange(
-    event: React.ChangeEvent<HTMLInputElement>
-  ) {
-    const file =
-      event.target.files?.[0];
-
-    if (!file) {
-      setSelectedFile(null);
+  const handleUpload = async () => {
+    if (!selectedFile) {
+      setError("Please select a PDF file first.");
       return;
     }
 
     if (
-      !file.name
+      !selectedFile.name
         .toLowerCase()
         .endsWith(".pdf")
     ) {
-      setError(
-        "Only PDF files are allowed."
-      );
-
-      setSelectedFile(null);
-      return;
-    }
-
-    setError("");
-    setSuccess("");
-    setSelectedFile(file);
-  }
-
-
-  async function uploadDocument() {
-    if (!selectedFile) {
-      setError(
-        "Please select a PDF file first."
-      );
-
+      setError("Only PDF files are allowed.");
       return;
     }
 
@@ -130,15 +168,11 @@ async function loadDocuments() {
     setError("");
     setSuccess("");
 
+    const formData = new FormData();
+
+    formData.append("file", selectedFile);
+
     try {
-      const formData =
-        new FormData();
-
-      formData.append(
-        "file",
-        selectedFile
-      );
-
       const response = await fetch(
         `${API_URL}/api/documents/upload`,
         {
@@ -151,340 +185,381 @@ async function loadDocuments() {
       );
 
       if (!response.ok) {
-        const data =
-          await response.json();
-
         throw new Error(
-          data.detail ||
-            "Document upload failed."
+          await getErrorMessage(response)
         );
       }
 
-      const data =
-        await response.json();
+      const data = await response.json();
 
       setSuccess(
-        data.message ||
-          "Document uploaded successfully."
+        `${data.filename} uploaded and indexed successfully. ` +
+          `${data.pages} pages, ${data.chunks} chunks.`
       );
 
       setSelectedFile(null);
 
-      const input =
-        document.getElementById(
-          "document-file"
-        ) as HTMLInputElement | null;
+      // Clear the file input after successful upload.
+      const fileInput = document.getElementById(
+        "document-file-input"
+      ) as HTMLInputElement | null;
 
-      if (input) {
-        input.value = "";
+      if (fileInput) {
+        fileInput.value = "";
       }
 
-      await loadDocuments();
-    } catch (error) {
+      await fetchDocuments();
+    } catch (err) {
       setError(
-        error instanceof Error
-          ? error.message
-          : "Document upload failed."
+        err instanceof Error
+          ? err.message
+          : "Failed to upload document."
       );
+
+      // Refresh because the backend may have saved
+      // the PDF and marked its indexing as failed.
+      await fetchDocuments();
     } finally {
       setUploading(false);
     }
-  }
+  };
 
+  // -------------------------
+  // Delete document
+  // -------------------------
 
-  async function deleteDocument(
+  const handleDelete = async (
     filename: string
-  ) {
-    const confirmed =
-      window.confirm(
-        `Delete "${filename}" from the knowledge base?`
-      );
+  ) => {
+    const confirmed = window.confirm(
+      `Are you sure you want to delete "${filename}"?\n\n` +
+        "This will remove the document from the knowledge base."
+    );
 
-    if (!confirmed) {
-      return;
-    }
+    if (!confirmed) return;
 
     setDeleting(filename);
     setError("");
     setSuccess("");
 
     try {
-      const response =
-        await fetch(
-          `${API_URL}/api/documents/${encodeURIComponent(
-            filename
-          )}`,
-          {
-            method: "DELETE",
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
-        );
+      const response = await fetch(
+        `${API_URL}/api/documents/${encodeURIComponent(
+          filename
+        )}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
 
       if (!response.ok) {
-        const data =
-          await response.json();
-
         throw new Error(
-          data.detail ||
-            "Failed to delete document."
+          await getErrorMessage(response)
         );
       }
 
-      const data =
-        await response.json();
-
       setSuccess(
-        data.message ||
-          "Document deleted successfully."
+        `${filename} deleted successfully.`
       );
 
-      await loadDocuments();
-    } catch (error) {
+      await fetchDocuments();
+    } catch (err) {
       setError(
-        error instanceof Error
-          ? error.message
+        err instanceof Error
+          ? err.message
           : "Failed to delete document."
       );
     } finally {
       setDeleting(null);
     }
-  }
+  };
 
-
-  function formatFileSize(
-    bytes: number
-  ) {
-    if (bytes < 1024) {
-      return `${bytes} B`;
-    }
-
-    if (bytes < 1024 * 1024) {
-      return `${(
-        bytes / 1024
-      ).toFixed(1)} KB`;
-    }
-
-    return `${(
-      bytes /
-      (1024 * 1024)
-    ).toFixed(1)} MB`;
-  }
-
+  // -------------------------
+  // Render
+  // -------------------------
 
   return (
-    <section className="admin-documents">
-
+    <div className="admin-documents">
       <div className="admin-documents-header">
-
         <div>
-          <div className="admin-eyebrow">
-            ADMIN
-          </div>
-
-          <h2>
-            Knowledge Base
-          </h2>
+          <h2>Manage Documents</h2>
 
           <p>
-            Upload and manage the documents
-            your AI assistant can use.
+            Upload and manage documents in the
+            organization's knowledge base.
           </p>
         </div>
 
         <button
+          type="button"
           className="refresh-documents-button"
-          onClick={loadDocuments}
-          disabled={loading}
+          onClick={fetchDocuments}
+          disabled={loading || uploading}
         >
-          ↻ Refresh
+          {loading ? "Refreshing..." : "Refresh"}
         </button>
-
       </div>
 
+      {/* -------------------------
+          Alerts
+      ------------------------- */}
 
-      <div className="document-upload-card">
+      {error && (
+        <div
+          className="admin-alert admin-alert-error"
+          role="alert"
+        >
+          <span>{error}</span>
 
-        <div className="upload-heading">
-          <div className="upload-icon">
-            ↑
-          </div>
-
-          <div>
-            <h3>
-              Add a document
-            </h3>
-
-            <p>
-              Upload a PDF to add it to
-              the AI knowledge base.
-            </p>
-          </div>
+          <button
+            type="button"
+            onClick={() => setError("")}
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
         </div>
+      )}
 
+      {success && (
+        <div
+          className="admin-alert admin-alert-success"
+          role="status"
+        >
+          <span>{success}</span>
 
-        <div className="upload-controls">
+          <button
+            type="button"
+            onClick={() => setSuccess("")}
+            aria-label="Dismiss success message"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
+      {/* -------------------------
+          Upload section
+      ------------------------- */}
+
+      <div className="admin-upload-section">
+        <h3>Upload a document</h3>
+
+        <p>
+          Select a PDF to add it to the knowledge
+          base. The document will be validated and
+          indexed automatically.
+        </p>
+
+        <div className="admin-upload-controls">
           <input
-            id="document-file"
+            id="document-file-input"
             type="file"
             accept=".pdf,application/pdf"
-            onChange={
-              handleFileChange
-            }
+            disabled={uploading}
+            onChange={(event) => {
+              const file =
+                event.target.files?.[0] ?? null;
+
+              setSelectedFile(file);
+              setError("");
+              setSuccess("");
+            }}
           />
 
           <button
-            className="upload-button"
-            onClick={
-              uploadDocument
-            }
-            disabled={
-              uploading ||
-              !selectedFile
-            }
+            type="button"
+            className="upload-document-button"
+            onClick={handleUpload}
+            disabled={!selectedFile || uploading}
           >
             {uploading
-              ? "Processing..."
+              ? "Uploading and indexing..."
               : "Upload PDF"}
           </button>
-
         </div>
 
-
         {selectedFile && (
-          <div className="selected-file">
-            Selected:
-            <strong>
-              {selectedFile.name}
-            </strong>
+          <div className="selected-file-info">
+            <span>
+              Selected: {selectedFile.name}
+            </span>
+
+            <span>
+              {formatFileSize(selectedFile.size)}
+            </span>
           </div>
         )}
 
+        {uploading && (
+          <div className="upload-progress-message">
+            <span className="admin-spinner" />
+
+            <span>
+              Validating PDF and indexing its
+              contents. This may take a while for
+              large documents.
+            </span>
+          </div>
+        )}
       </div>
 
+      {/* -------------------------
+          Document list
+      ------------------------- */}
 
-      {error && (
-        <div className="document-alert error">
-          {error}
-        </div>
-      )}
+      <div className="admin-document-list-section">
+        <div className="admin-document-list-header">
+          <h3>Knowledge Base Documents</h3>
 
-
-      {success && (
-        <div className="document-alert success">
-          {success}
-        </div>
-      )}
-
-
-      <div className="documents-list-card">
-
-        <div className="documents-list-header">
-          <h3>
-            Uploaded documents
-          </h3>
-
-          <span>
-            {documents.length}
+          <span className="document-count">
+            {documents.length}{" "}
+            {documents.length === 1
+              ? "document"
+              : "documents"}
           </span>
         </div>
 
+        {loading && documents.length === 0 ? (
+          <div className="admin-empty-state">
+            <span className="admin-spinner" />
 
-        {loading ? (
-          <div className="documents-empty">
-            <div className="spinner"></div>
-            <p>
-              Loading documents...
-            </p>
+            <p>Loading documents...</p>
           </div>
         ) : documents.length === 0 ? (
-          <div className="documents-empty">
-            <div className="empty-document-icon">
-              📄
-            </div>
+          <div className="admin-empty-state">
+            <p>No documents found.</p>
 
-            <h4>
-              No uploaded documents
-            </h4>
-
-            <p>
-              Upload your first PDF above.
-            </p>
+            <span>
+              Upload a PDF to start building your
+              knowledge base.
+            </span>
           </div>
         ) : (
-          <div className="document-list">
+          <div className="admin-document-list">
+            {documents.map((document) => (
+              <div
+                key={document.id}
+                className="admin-document-card"
+              >
+                <div className="admin-document-main">
+                  <div className="admin-document-info">
+                    <div className="admin-document-title">
+                      <span className="document-pdf-icon">
+                        PDF
+                      </span>
 
-            {documents.map(
-              (document) => (
-                <div
-                  className="document-row"
-                  key={
-                    document.filename
-                  }
-                >
-
-                  <div className="document-main">
-
-                    <div className="document-file-icon">
-                      PDF
+                      <h4>
+                        {document.filename}
+                      </h4>
                     </div>
 
-                    <div className="document-details">
-
-                      <div className="document-name">
-                        {
-                          document.filename
-                        }
-                      </div>
-
-                      <div className="document-meta">
+                    <div className="admin-document-meta">
+                      <span>
                         {formatFileSize(
                           document.size
                         )}
+                      </span>
 
-                        {document.uploaded_at &&
-                          ` • ${new Date(
-                            document.uploaded_at
-                          ).toLocaleDateString()}`}
-                      </div>
+                      <span>
+                        {document.pages}{" "}
+                        {document.pages === 1
+                          ? "page"
+                          : "pages"}
+                      </span>
 
+                      <span>
+                        {document.chunks}{" "}
+                        {document.chunks === 1
+                          ? "chunk"
+                          : "chunks"}
+                      </span>
                     </div>
 
+                    <div className="admin-document-date">
+                      Uploaded{" "}
+                      {formatDate(
+                        document.uploaded_at
+                      )}
+                    </div>
                   </div>
 
+                  <div className="admin-document-actions">
+                    <span
+                      className={`document-status ${document.status}`}
+                    >
+                      {document.status ===
+                        "indexed" && (
+                        <>
+                          <span>✓</span>
+                          Indexed
+                        </>
+                      )}
 
-                  <button
-                    className="delete-document-button"
-                    onClick={() =>
-                      deleteDocument(
+                      {document.status ===
+                        "indexing" && (
+                        <>
+                          <span>⏳</span>
+                          Indexing
+                        </>
+                      )}
+
+                      {document.status ===
+                        "failed" && (
+                        <>
+                          <span>✕</span>
+                          Failed
+                        </>
+                      )}
+
+                      {![
+                        "indexed",
+                        "indexing",
+                        "failed",
+                      ].includes(document.status) && (
+                        <>Unknown status</>
+                      )}
+                    </span>
+
+                    <button
+                      type="button"
+                      className="delete-document-button"
+                      onClick={() =>
+                        handleDelete(
+                          document.filename
+                        )
+                      }
+                      disabled={
+                        deleting ===
                         document.filename
-                      )
-                    }
-                    disabled={
-                      deleting ===
+                      }
+                    >
+                      {deleting ===
                       document.filename
-                    }
-                  >
-                    {deleting ===
-                    document.filename
-                      ? "Deleting..."
-                      : "Delete"}
-                  </button>
-
+                        ? "Deleting..."
+                        : "Delete"}
+                    </button>
+                  </div>
                 </div>
-              )
-            )}
 
+                {document.status === "failed" &&
+                  document.error && (
+                    <div className="document-error">
+                      <strong>
+                        Indexing error:
+                      </strong>
+
+                      <p>{document.error}</p>
+                    </div>
+                  )}
+              </div>
+            ))}
           </div>
         )}
-
       </div>
-
-    </section>
+    </div>
   );
 }
-
-export default AdminDocuments;
-
