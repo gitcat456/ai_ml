@@ -1,4 +1,4 @@
-
+from pypdf import PdfReader
 from io import BytesIO
 from pathlib import Path
 
@@ -224,31 +224,21 @@ async def upload_document(
     current_user: models.User = Depends(
         require_admin
     ),
+    db: Session = Depends(database.get_db),
 ):
-    # ---------------------------------
-    # 1. Validate filename
-    # ---------------------------------
-
     if not file.filename:
         raise HTTPException(
             status_code=400,
             detail="A filename is required.",
         )
 
-    filename = Path(
-        file.filename
-    ).name
+    filename = Path(file.filename).name
 
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are allowed.",
         )
-
-
-    # ---------------------------------
-    # 2. Read the uploaded file
-    # ---------------------------------
 
     file_content = await file.read()
 
@@ -258,17 +248,7 @@ async def upload_document(
             detail="The uploaded file is empty.",
         )
 
-
-    # ---------------------------------
-    # 3. Validate the actual PDF
-    # ---------------------------------
-    #
-    # MIME type is not enough.
-    # We check the actual file contents.
-
-    if not file_content.startswith(
-        b"%PDF-"
-    ):
+    if not file_content.startswith(b"%PDF-"):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -278,17 +258,18 @@ async def upload_document(
             ),
         )
 
-
-    # ---------------------------------
-    # 4. Try parsing the PDF
-    # ---------------------------------
+    # -------------------------
+    # Validate PDF
+    # -------------------------
 
     try:
         reader = PdfReader(
             BytesIO(file_content)
         )
 
-        if len(reader.pages) == 0:
+        pages = len(reader.pages)
+
+        if pages == 0:
             raise ValueError(
                 "PDF contains no pages."
             )
@@ -302,20 +283,35 @@ async def upload_document(
             ),
         ) from error
 
+    # -------------------------
+    # Prevent duplicate filename
+    # -------------------------
 
-    # ---------------------------------
-    # 5. Save the file
-    # ---------------------------------
-
-    file_path = (
-        UPLOAD_DIR / filename
+    existing_document = (
+        db.query(models.Document)
+        .filter(
+            models.Document.filename == filename
+        )
+        .first()
     )
 
+    if existing_document:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A document with this filename "
+                "already exists."
+            ),
+        )
+
+    # -------------------------
+    # Save PDF
+    # -------------------------
+
+    file_path = UPLOAD_DIR / filename
+
     try:
-        with open(
-            file_path,
-            "wb",
-        ) as buffer:
+        with open(file_path, "wb") as buffer:
             buffer.write(file_content)
 
     except Exception as error:
@@ -324,79 +320,99 @@ async def upload_document(
             detail="Failed to save the uploaded document.",
         ) from error
 
+    # -------------------------
+    # Create document record
+    # -------------------------
 
-    # ---------------------------------
-    # 6. Index the document
-    # ---------------------------------
+    document_record = models.Document(
+        filename=filename,
+        size=len(file_content),
+        pages=pages,
+        chunks=0,
+        status="indexing",
+    )
+
+    db.add(document_record)
+    db.commit()
+    db.refresh(document_record)
+
+    # -------------------------
+    # Index document
+    # -------------------------
 
     try:
-        ingestion_result = (
-            rag.ingest_document(
-                str(file_path)
-            )
+        ingestion_result = rag.ingest_document(
+            str(file_path)
         )
 
-    except Exception as error:
-        # If indexing fails, remove the file
-        # so we don't leave a document that
-        # exists on disk but isn't in the index.
+        document_record.chunks = ingestion_result.get(
+            "nodes",
+            0,
+        )
 
-        if file_path.exists():
-            file_path.unlink()
+        document_record.status = "indexed"
+        document_record.error = None
+
+        db.commit()
+
+    except Exception as error:
+
+        document_record.status = "failed"
+        document_record.error = str(error)
+
+        db.commit()
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "The PDF was valid, but the document "
-                "could not be indexed."
+                "The PDF was saved, but indexing failed. "
+                "The document remains available for retry."
             ),
         ) from error
-
-
-    # ---------------------------------
-    # 7. Success
-    # ---------------------------------
 
     return {
         "message": (
             "Document uploaded and indexed successfully."
         ),
         "filename": filename,
-        "documents": ingestion_result.get(
-            "documents",
-            0,
-        ),
-        "nodes": ingestion_result.get(
-            "nodes",
-            0,
-        ),
+        "pages": document_record.pages,
+        "chunks": document_record.chunks,
+        "status": document_record.status,
     }
-
-
 @app.get("/api/documents")
 def list_documents(
     current_user: models.User = Depends(
         require_admin
     ),
+    db: Session = Depends(database.get_db),
 ):
-    documents = []
-
-    for file_path in UPLOAD_DIR.iterdir():
-        if (
-            file_path.is_file()
-            and file_path.suffix.lower() == ".pdf"
-        ):
-            documents.append(
-                {
-                    "filename": file_path.name,
-                    "size": file_path.stat().st_size,
-                }
-            )
+    documents = (
+        db.query(models.Document)
+        .order_by(
+            models.Document.uploaded_at.desc()
+        )
+        .all()
+    )
 
     return {
-        "documents": documents
+        "documents": [
+            {
+                "id": document.id,
+                "filename": document.filename,
+                "size": document.size,
+                "pages": document.pages,
+                "chunks": document.chunks,
+                "status": document.status,
+                "error": document.error,
+                "uploaded_at": (
+                    document.uploaded_at.isoformat()
+                    if document.uploaded_at
+                    else None
+                ),
+            }
+            for document in documents
+        ]
     }
-
 
 @app.delete("/api/documents/{filename}")
 def delete_document(
