@@ -420,24 +420,28 @@ def delete_document(
     current_user: models.User = Depends(
         require_admin
     ),
+    db: Session = Depends(database.get_db),
 ):
-    filename = Path(
-        filename
-    ).name
+    filename = Path(filename).name
 
-    file_path = (
-        UPLOAD_DIR / filename
+    document = (
+        db.query(models.Document)
+        .filter(
+            models.Document.filename == filename
+        )
+        .first()
     )
 
-    if not file_path.exists():
+    if not document:
         raise HTTPException(
             status_code=404,
             detail="Document not found.",
         )
 
-    deleted = rag.delete_document(
-        filename
-    )
+    file_path = UPLOAD_DIR / filename
+
+    # Remove from vector index
+    deleted = rag.delete_document(filename)
 
     if not deleted:
         raise HTTPException(
@@ -445,14 +449,18 @@ def delete_document(
             detail="Document is not indexed.",
         )
 
-    file_path.unlink()
+    # Remove physical file
+    if file_path.exists():
+        file_path.unlink()
+
+    # Remove database record
+    db.delete(document)
+    db.commit()
 
     return {
         "message": "Document deleted successfully.",
         "filename": filename,
     }
-
-
 # -------------------------
 # Development
 # -------------------------
