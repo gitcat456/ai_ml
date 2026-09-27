@@ -58,7 +58,7 @@ class ChatbotService:
 
         # 5. Check whether the evidence supports answering.
         scope_decision = self.scope_guard.check(
-            query=message,
+            query=retrieval_query,
             chunks=chunks
         )
 
