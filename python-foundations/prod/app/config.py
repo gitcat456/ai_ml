@@ -12,7 +12,11 @@ load_dotenv(BASE_DIR / ".env")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 LLM_MODEL = os.getenv(
     "LLM_MODEL",
-    "openai/gpt-oss-120b"
+    "qwen/qwen3.8-27b"
+)
+FAST_LLM_MODEL = os.getenv(
+    "FAST_LLM_MODEL",
+    "qwen/qwen3.8-27b"
 )
 
 EMBEDDING_MODEL = os.getenv(
