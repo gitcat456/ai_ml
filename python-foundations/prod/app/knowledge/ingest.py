@@ -64,8 +64,9 @@ def configure_embedding():
 
 def chunk_documents(documents):
     """
-    Split documents into overlapping text chunks.
+    Split documents into overlapping text chunks and enrich with structural metadata.
     """
+    from app.knowledge.retriever import extract_structural_context, format_document_title
 
     splitter = SentenceSplitter(
         chunk_size=512,
@@ -77,7 +78,30 @@ def chunk_documents(documents):
         show_progress=True,
     )
 
-    print(f"Created {len(nodes)} chunks.")
+    for node in nodes:
+        raw_filename = node.metadata.get("file_name") or node.metadata.get("filename")
+        page_label = node.metadata.get("page_label")
+        try:
+            page_num = int(page_label) if page_label is not None else None
+        except (ValueError, TypeError):
+            page_num = None
+
+        doc_title, article, section, chapter, citation_label = extract_structural_context(
+            node.get_content(), raw_filename, page_num
+        )
+
+        node.metadata["clean_filename"] = format_document_title(raw_filename)
+        node.metadata["document_title"] = doc_title
+        if article:
+            node.metadata["article"] = article
+        if section:
+            node.metadata["section"] = section
+        if chapter:
+            node.metadata["chapter"] = chapter
+        if citation_label:
+            node.metadata["citation_label"] = citation_label
+
+    print(f"Created {len(nodes)} chunks with structural metadata.")
 
     return nodes
 
