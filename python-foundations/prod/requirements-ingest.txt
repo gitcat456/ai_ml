@@ -1,0 +1,12 @@
+# =============================================================================
+# EUSDA AI Chatbot Service — Local Document Ingestion Requirements
+# =============================================================================
+# Used ONLY on the local developer machine when adding or updating documents
+# in Qdrant Cloud. Never deployed to the production web server.
+# =============================================================================
+
+# Include base runtime requirements
+-r requirements.txt
+
+# Document Loaders & Parsers (Ingest-only)
+pypdf==6.18.0
