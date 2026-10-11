@@ -1,24 +1,19 @@
+import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
-from llama_index.core import (
-    Settings,
-    StorageContext,
-    load_index_from_storage,
-)
-from llama_index.core.schema import NodeWithScore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core.postprocessor import SentenceTransformerRerank
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
 
 from app.config import (
-    EMBEDDING_MODEL,
-    RERANKER_MODEL,
+    EMBEDDING_DIM,
+    QDRANT_API_KEY,
+    QDRANT_COLLECTION,
+    QDRANT_URL,
 )
+from app.knowledge.embeddings import BaseEmbeddingProvider, get_embedding_provider
 
-
-BASE_DIR = Path(__file__).resolve().parents[2]
-STORAGE_DIR = BASE_DIR / "storage"
+logger = logging.getLogger(__name__)
 
 
 def format_document_title(filename: str | None) -> str:
@@ -103,88 +98,154 @@ class RetrievedChunk:
 
 class KnowledgeRetriever:
     """
-    Retrieves and reranks relevant organizational document chunks.
+    Retrieves relevant organizational document chunks from Qdrant Cloud
+    using Google Gemini embeddings.
     """
 
-    def __init__(self):
-        self.index = None
-        self.retriever = None
-        self.reranker = None
+    def __init__(
+        self,
+        embedding_provider: BaseEmbeddingProvider | None = None,
+        qdrant_client: QdrantClient | None = None,
+        collection_name: str | None = None,
+    ):
+        self.embedding_provider = embedding_provider
+        self.client = qdrant_client
+        self.collection_name = collection_name or QDRANT_COLLECTION
+        self._vector_name: str | None = None
+        self._initialized = False
 
     def _load_index(self):
         """
-        Load the persisted index only when retrieval is first requested.
+        Initialize the embedding provider and Qdrant client connection.
+        Verifies collection dimensions and vector naming.
         """
-
-        if self.index is not None:
+        if self._initialized:
             return
 
-        if not STORAGE_DIR.exists():
-            raise RuntimeError(
-                "Knowledge index does not exist. "
-                "Run the document ingestion pipeline first."
+        if not self.embedding_provider:
+            self.embedding_provider = get_embedding_provider()
+
+        if not self.client:
+            if not QDRANT_URL or not QDRANT_API_KEY:
+                raise RuntimeError(
+                    "QDRANT_URL and QDRANT_API_KEY must be set in environment."
+                )
+            self.client = QdrantClient(
+                url=QDRANT_URL,
+                api_key=QDRANT_API_KEY,
+                timeout=20.0,
             )
 
-        embed_model = HuggingFaceEmbedding(
-            model_name=EMBEDDING_MODEL,
-        )
+        # Inspect collection configuration
+        try:
+            coll_info = self.client.get_collection(self.collection_name)
+            vectors_config = coll_info.config.params.vectors
 
-        Settings.embed_model = embed_model
+            # Check if vector configuration is a dict with named vectors or single VectorParams
+            if isinstance(vectors_config, dict):
+                # If there's an empty key '', it's the default unnamed vector
+                if "" not in vectors_config and len(vectors_config) > 0:
+                    self._vector_name = list(vectors_config.keys())[0]
+                    v_params = vectors_config[self._vector_name]
+                else:
+                    v_params = vectors_config.get("")
+            else:
+                v_params = vectors_config
 
-        storage_context = StorageContext.from_defaults(
-            persist_dir=str(STORAGE_DIR)
-        )
+            if v_params and hasattr(v_params, "size"):
+                if v_params.size != EMBEDDING_DIM:
+                    logger.warning(
+                        "Qdrant collection '%s' vector dimension (%d) does not match EMBEDDING_DIM (%d).",
+                        self.collection_name,
+                        v_params.size,
+                        EMBEDDING_DIM,
+                    )
+            logger.info(
+                "Connected to Qdrant Cloud collection '%s' (points: %d, vector_name: %s)",
+                self.collection_name,
+                coll_info.points_count or 0,
+                self._vector_name or "<default>",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not verify Qdrant collection '%s' at startup (%s). Will attempt retrieval on demand.",
+                self.collection_name,
+                exc,
+            )
 
-        self.index = load_index_from_storage(
-            storage_context
-        )
+        self._initialized = True
 
-        self.retriever = self.index.as_retriever(
-            similarity_top_k=15,
-        )
-
-        self.reranker = SentenceTransformerRerank(
-            model=RERANKER_MODEL,
-            top_n=7,
-        )
-
-    def retrieve(self, query: str) -> list[RetrievedChunk]:
+    def retrieve(self, query: str, top_k: int = 6) -> list[RetrievedChunk]:
         """
-        Retrieve candidate chunks and rerank them for a query.
+        Retrieve top-k semantically relevant chunks from Qdrant Cloud.
         """
-
         self._load_index()
 
-        nodes: list[NodeWithScore] = self.retriever.retrieve(
-            query
-        )
+        if not query or not query.strip():
+            return []
 
-        reranked_nodes = self.reranker.postprocess_nodes(
-            nodes,
-            query_str=query,
-        )
+        # 1. Generate query embedding via Gemini
+        query_vector = self.embedding_provider.embed_query(query)
 
+        # 2. Query Qdrant Cloud
+        try:
+            # Query points
+            if hasattr(self.client, "query_points"):
+                response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_vector,
+                    using=self._vector_name,
+                    limit=top_k,
+                )
+                points = response.points
+            else:
+                points = self.client.search(
+                    collection_name=self.collection_name,
+                    query_vector=(
+                        (self._vector_name, query_vector)
+                        if self._vector_name
+                        else query_vector
+                    ),
+                    limit=top_k,
+                )
+        except Exception as exc:
+            logger.error("Qdrant retrieval error: %s", exc)
+            raise RuntimeError(f"Vector search failed: {exc}") from exc
+
+        # 3. Parse retrieved points into RetrievedChunk objects
         results = []
+        for point in points:
+            payload = point.payload or {}
+            content = payload.get("text") or ""
+            raw_filename = payload.get("source") or payload.get("filename")
+            raw_page = payload.get("page")
 
-        for item in reranked_nodes:
-            node = item.node
-            metadata = node.metadata or {}
-            raw_filename = (
-                metadata.get("file_name")
-                or metadata.get("filename")
-            )
-            raw_page = metadata.get("page_label")
             try:
                 page_num = int(raw_page) if raw_page is not None else None
             except (ValueError, TypeError):
                 page_num = None
 
-            content = node.get_content()
-            doc_title, article, section, chapter, citation_label = (
-                extract_structural_context(content, raw_filename, page_num)
-            )
+            # Fallback metadata extraction if not stored in payload
+            doc_title = payload.get("document_title")
+            article = payload.get("article")
+            section = payload.get("section")
+            chapter = payload.get("chapter")
+            citation_label = payload.get("citation_label")
 
-            # Clean filename to never expose .pdf
+            if not doc_title or not citation_label:
+                (
+                    extracted_doc_title,
+                    extracted_art,
+                    extracted_sec,
+                    extracted_chap,
+                    extracted_label,
+                ) = extract_structural_context(content, raw_filename, page_num)
+                doc_title = doc_title or extracted_doc_title
+                article = article or extracted_art
+                section = section or extracted_sec
+                chapter = chapter or extracted_chap
+                citation_label = citation_label or extracted_label
+
             clean_filename = format_document_title(raw_filename)
 
             results.append(
@@ -192,15 +253,11 @@ class KnowledgeRetriever:
                     text=content,
                     filename=clean_filename,
                     document_title=doc_title,
-                    article=article or metadata.get("article"),
-                    section=section or metadata.get("section"),
-                    chapter=chapter or metadata.get("chapter"),
+                    article=article,
+                    section=section,
+                    chapter=chapter,
                     page=page_num,
-                    score=(
-                        float(item.score)
-                        if item.score is not None
-                        else None
-                    ),
+                    score=float(point.score) if point.score is not None else None,
                     citation_label=citation_label,
                 )
             )
