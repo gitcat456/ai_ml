@@ -258,14 +258,16 @@ class ChatbotService:
         chunks: list[RetrievedChunk],
         history: list[dict[str, str]],
     ) -> str:
-        # Build the evidence context with explicit citation headers.
+        # Build the evidence context with explicit citation headers and document types.
         context_parts = []
 
         for index, chunk in enumerate(chunks, start=1):
             source_label = chunk.citation_label or chunk.filename or "EUSDA Document"
+            doc_type = getattr(chunk, "doc_type", "reference") or "reference"
 
             evidence = dedent(f"""
                 [EVIDENCE {index}]
+                Type: {doc_type}
                 Source: {source_label}
 
                 Content:
@@ -282,7 +284,7 @@ class ChatbotService:
             for item in history
         )
 
-        # Build the prompt enforcing inline fact citations.
+        # Build the prompt enforcing conditional fact citations.
         user_prompt = dedent(f"""
             RECENT CONVERSATION:
             {history_text or "No previous conversation."}
@@ -300,7 +302,9 @@ class ChatbotService:
             - Answer the user's question clearly, thoroughly, and helpfully using the organizational evidence.
             - IMPORTANT: If the user asked about qualifications, requirements, or criteria for leadership, treat election conditions, membership requirements (e.g. baptism), term limits, conduct standards, and nominating committee criteria AS qualifications and synthesize them into a cohesive answer.
             - Format key duties, responsibilities, or sections with clean markdown bullet points.
-            - FOR EVERY FACTUAL CLAIM, append an inline citation badge immediately after the full stop (e.g. `[EUSDA Constitution, Art. 4, Sec. D, p. 15]` or `[SDA Church Manual, Ch. 8, p. 74]`).
+            - CITATION RULES:
+              * For facts drawn from REFERENCE DOCUMENTS (Type: reference), append an inline citation badge immediately after the full stop (e.g. `[EUSDA Constitution, Art. 4, Sec. D, p. 15]` or `[SDA Church Manual, Ch. 8, p. 74]`).
+              * For facts drawn from GENERAL KNOWLEDGE (Type: general_knowledge), do NOT include any citation badge, source reference, or file name. Speak naturally as a knowledgeable staff member.
             - Do not include raw file extensions (like `.pdf`).
             - If user context (like member name) was established in recent conversation, address the member warmly.
         """).strip()
@@ -411,6 +415,10 @@ Rewrite the current question as one standalone question suitable for searching o
         seen = set()
 
         for chunk in chunks:
+            # Exclude general knowledge chunks from returned source references
+            if getattr(chunk, "doc_type", "reference") == "general_knowledge":
+                continue
+
             filename = chunk.filename or "EUSDA Document"
             page = chunk.page
             citation_label = chunk.citation_label
