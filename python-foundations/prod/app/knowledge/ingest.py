@@ -9,6 +9,7 @@ from typing import Generator
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
+import time
 
 # Ensure project root is in sys.path when run directly
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -129,6 +130,9 @@ def load_raw_documents() -> list[dict]:
 
         logger.info("Reading document: %s", filename)
 
+        # Determine document type: reference (.pdf) vs general_knowledge (.txt / knowledge folder)
+        doc_type = "reference" if ext == ".pdf" else "general_knowledge"
+
         if ext == ".pdf":
             try:
                 import pypdf
@@ -141,6 +145,7 @@ def load_raw_documents() -> list[dict]:
                             "source": filename,
                             "page": page_idx,
                             "text": page_text,
+                            "doc_type": doc_type,
                         })
             except ImportError:
                 raise RuntimeError(
@@ -155,6 +160,7 @@ def load_raw_documents() -> list[dict]:
                         "source": filename,
                         "page": 1,
                         "text": content,
+                        "doc_type": doc_type,
                     })
             except Exception as exc:
                 logger.warning("Could not read text file %s: %s", filename, exc)
@@ -174,6 +180,7 @@ def prepare_chunks(records: list[dict]) -> list[dict]:
         source = rec["source"]
         page = rec.get("page")
         page_text = rec["text"]
+        doc_type = rec.get("doc_type", "reference")
 
         chunks = split_text_into_chunks(page_text, chunk_size=600, overlap=100)
 
@@ -190,6 +197,7 @@ def prepare_chunks(records: list[dict]) -> list[dict]:
                 "source": source,
                 "filename": format_document_title(source),
                 "document_title": doc_title,
+                "doc_type": doc_type,
                 "page": page,
                 "article": article,
                 "section": section,
@@ -232,7 +240,7 @@ def ensure_collection(client: QdrantClient, collection_name: str, dim: int):
 
 
 def ingest_to_qdrant(
-    batch_size: int = 50,
+    batch_size: int = 10,
 ):
     """
     Main ingestion execution:
@@ -271,6 +279,7 @@ def ingest_to_qdrant(
 
         logger.info("Embedding batch %d to %d of %d...", i + 1, min(i + batch_size, total), total)
         vectors = provider.embed_documents(texts)
+        time.sleep(7)  # 2s between batches → ~30 batches/min, well under Gemini's limit
 
         points = [
             models.PointStruct(
