@@ -56,7 +56,7 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
         api_key: str | None = None,
         model: str | None = None,
         dim: int | None = None,
-        batch_size: int = 50,
+        batch_size: int = 10,
         max_retries: int = 5,
         initial_backoff: float = 1.5,
     ):
@@ -173,8 +173,8 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
             )
             all_vectors.extend(vectors)
             # Brief delay between batches to respect free tier RPM limits
-            if i + self.batch_size < len(texts):
-                time.sleep(0.2)
+            # if i + self.batch_size < len(texts):
+            #     time.sleep(0.2)
 
         return all_vectors
 
