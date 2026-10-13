@@ -94,6 +94,7 @@ class RetrievedChunk:
     page: int | None = None
     score: float | None = None
     citation_label: str | None = None
+    doc_type: str = "reference"
 
 
 class KnowledgeRetriever:
@@ -231,6 +232,14 @@ class KnowledgeRetriever:
             section = payload.get("section")
             chapter = payload.get("chapter")
             citation_label = payload.get("citation_label")
+            doc_type = payload.get("doc_type")
+            if not doc_type:
+                # Fallback: .txt or .md files are general knowledge, .pdf are reference
+                doc_type = (
+                    "general_knowledge"
+                    if (raw_filename and raw_filename.lower().endswith((".txt", ".md")))
+                    else "reference"
+                )
 
             if not doc_title or not citation_label:
                 (
@@ -259,6 +268,7 @@ class KnowledgeRetriever:
                     page=page_num,
                     score=float(point.score) if point.score is not None else None,
                     citation_label=citation_label,
+                    doc_type=doc_type,
                 )
             )
 
