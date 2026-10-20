@@ -176,7 +176,7 @@ class KnowledgeRetriever:
 
         self._initialized = True
 
-    def retrieve(self, query: str, top_k: int = 6) -> list[RetrievedChunk]:
+    def retrieve(self, query: str, top_k: int = 8) -> list[RetrievedChunk]:
         """
         Retrieve top-k semantically relevant chunks from Qdrant Cloud.
         """
