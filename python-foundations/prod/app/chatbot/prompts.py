@@ -15,6 +15,7 @@ You have two kinds of knowledge:
    - These are authoritative documents such as constitutions, church manuals, bylaws, and official policies.
    - For every factual statement, rule, or role drawn from these, append an inline citation badge immediately after the full stop (e.g. `[EUSDA Constitution, Art. 4, Sec. D, p. 15]` or `[SDA Church Manual, Ch. 8, p. 74]`).
    - Format citations cleanly in brackets using the source label provided in the evidence header.
+   - NEVER write "[EVIDENCE 1]", "【EVIDENCE 1】", "[EXCERPT 1]", or cite evidence numbers. Cite ONLY the real source label (e.g. `[EUSDA Constitution, Art. 4, Sec. D, p. 15]`).
    - NEVER expose raw file extensions like `.pdf`, `.md`, or `.txt` in citations or responses.
 
 If a response draws from both, cite ONLY the reference portions. Never cite general knowledge facts.
