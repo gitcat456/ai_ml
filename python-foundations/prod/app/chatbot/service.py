@@ -123,7 +123,7 @@ class ChatbotService:
 
         # 5. Retrieve relevant organizational evidence.
         t_retrieve = time.monotonic()
-        chunks = self.retriever.retrieve(retrieval_query)
+        chunks = self.retriever.retrieve(retrieval_query, top_k=8)
         retrieve_latency = time.monotonic() - t_retrieve
         logger.info(
             "Retrieval complete: count=%d latency=%.3fs",
@@ -266,7 +266,7 @@ class ChatbotService:
             doc_type = getattr(chunk, "doc_type", "reference") or "reference"
 
             evidence = dedent(f"""
-                [EVIDENCE {index}]
+                --- EXCERPT {index} ---
                 Type: {doc_type}
                 Source: {source_label}
 
@@ -305,6 +305,7 @@ class ChatbotService:
             - CITATION RULES:
               * For facts drawn from REFERENCE DOCUMENTS (Type: reference), append an inline citation badge immediately after the full stop (e.g. `[EUSDA Constitution, Art. 4, Sec. D, p. 15]` or `[SDA Church Manual, Ch. 8, p. 74]`).
               * For facts drawn from GENERAL KNOWLEDGE (Type: general_knowledge), do NOT include any citation badge, source reference, or file name. Speak naturally as a knowledgeable staff member.
+              * CRITICAL: NEVER write "[EVIDENCE 1]", "【EVIDENCE 1】", "[EXCERPT 1]", or evidence numbers in your response. Always cite the exact source name provided in the Source field.
             - Do not include raw file extensions (like `.pdf`).
             - If user context (like member name) was established in recent conversation, address the member warmly.
         """).strip()
@@ -332,7 +333,42 @@ class ChatbotService:
                 "The answer generation model returned an empty response."
             )
 
-        return answer.strip()
+        return self._clean_evidence_tags(answer.strip(), chunks)
+
+    @staticmethod
+    def _clean_evidence_tags(text: str, chunks: list[RetrievedChunk]) -> str:
+        """
+        Replaces any stray model evidence tags (e.g. 【EVIDENCE 1】 or [EVIDENCE 2])
+        with the true chunk citation label, normalizes Chinese brackets to ASCII,
+        and eliminates orphan evidence numbers.
+        """
+        def _repl(match):
+            try:
+                idx = int(match.group(1)) - 1
+                if 0 <= idx < len(chunks):
+                    c = chunks[idx]
+                    if getattr(c, "doc_type", "reference") == "reference" and c.citation_label:
+                        return f" [{c.citation_label}]"
+            except (ValueError, IndexError):
+                pass
+            return ""
+
+        # Replace bracketed evidence/excerpt markers
+        cleaned = re.sub(
+            r"[【\[]\s*(?:EVIDENCE|EXCERPT|DOCUMENT|PASSAGE)\s*(\d+)\s*[】\]]",
+            _repl,
+            text,
+            flags=re.IGNORECASE,
+        )
+        # Normalize full-width Chinese brackets 【...】 to ASCII [...]
+        cleaned = re.sub(r"【(.*?)】", r"[\1]", cleaned)
+        # Clean trailing periods inside brackets (e.g. [EUSDA Constitution, p. 15.] -> [EUSDA Constitution, p. 15])
+        cleaned = re.sub(r"\[([^\]]+?)\.\s*\]", r"[\1]", cleaned)
+        # Clean double spaces and punctuation spacing
+        cleaned = re.sub(r"\s+([,.])", r"\1", cleaned)
+        cleaned = re.sub(r"([,.])\s*\[", r"\1 [", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned.strip()
 
     # -----------------------------------------------------------------------
     # Follow-up query contextualization
