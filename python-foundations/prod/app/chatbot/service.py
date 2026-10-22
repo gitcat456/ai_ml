@@ -364,10 +364,11 @@ class ChatbotService:
         cleaned = re.sub(r"【(.*?)】", r"[\1]", cleaned)
         # Clean trailing periods inside brackets (e.g. [EUSDA Constitution, p. 15.] -> [EUSDA Constitution, p. 15])
         cleaned = re.sub(r"\[([^\]]+?)\.\s*\]", r"[\1]", cleaned)
-        # Clean double spaces and punctuation spacing
-        cleaned = re.sub(r"\s+([,.])", r"\1", cleaned)
-        cleaned = re.sub(r"([,.])\s*\[", r"\1 [", cleaned)
-        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        # Collapse only horizontal whitespace (spaces/tabs) — never newlines.
+        # Collapsing \s{2,} would destroy markdown paragraph/heading/hr structure.
+        cleaned = re.sub(r"[ \t]+([,.])", r"\1", cleaned)
+        cleaned = re.sub(r"([,.])[ \t]*\[", r"\1 [", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
         return cleaned.strip()
 
     # -----------------------------------------------------------------------
