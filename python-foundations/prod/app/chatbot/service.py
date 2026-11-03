@@ -300,6 +300,10 @@ class ChatbotService:
 
             Instructions:
             - Answer the user's question clearly, thoroughly, and helpfully using the organizational evidence.
+            - LEADERSHIP & ROLE HOLDERS: If the user asks who heads, leads, directs, or holds a department or role (e.g. "who is the communication director", "who is the Deaconry head", "who is the chair"):
+              * Always state the PERSON'S NAME directly in the opening sentence (e.g. "**Otieno Elbright** is the Communication and Publicity head for the 2026-2027 leadership term.").
+              * Follow with key duties, responsibilities, or contact links in bullet points.
+              * Only state that the current holder is not listed if the evidence contains NO mention of the person.
             - IMPORTANT: If the user asked about qualifications, requirements, or criteria for leadership, treat election conditions, membership requirements (e.g. baptism), term limits, conduct standards, and nominating committee criteria AS qualifications and synthesize them into a cohesive answer.
             - Format key duties, responsibilities, or sections with clean markdown bullet points.
             - CITATION RULES:
