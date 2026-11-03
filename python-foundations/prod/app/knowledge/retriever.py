@@ -70,6 +70,10 @@ _LEADERSHIP_ROLE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_PAGE_PATTERN = re.compile(r"\b(?:page|p\.?)\s*(\d+)\b", re.IGNORECASE)
+_SECTION_PATTERN = re.compile(r"\b(?:section|sec\.?)\s*([a-zA-Z0-9]+)\b", re.IGNORECASE)
+_ARTICLE_PATTERN = re.compile(r"\b(?:article|art\.?)\s*([a-zA-Z0-9]+)\b", re.IGNORECASE)
+
 
 def format_document_title(filename: str | None) -> str:
     """Format a user-friendly document name without raw file extensions."""
@@ -243,6 +247,18 @@ class KnowledgeRetriever:
                     logger.info("Ensured full-text payload index on 'text' in '%s'.", self.collection_name)
                 except Exception as idx_exc:
                     logger.warning("Could not auto-create payload index on 'text': %s", idx_exc)
+
+            # Ensure integer payload index exists on 'page' field
+            if "page" not in schema:
+                try:
+                    self.client.create_payload_index(
+                        collection_name=self.collection_name,
+                        field_name="page",
+                        field_schema=models.PayloadSchemaType.INTEGER,
+                    )
+                    logger.info("Ensured integer payload index on 'page' in '%s'.", self.collection_name)
+                except Exception as idx_exc:
+                    logger.warning("Could not auto-create payload index on 'page': %s", idx_exc)
         except Exception as exc:
             logger.warning(
                 "Could not verify Qdrant collection '%s' at startup (%s). Will attempt retrieval on demand.",
@@ -464,12 +480,73 @@ class KnowledgeRetriever:
             )
             keyword_points.extend(kw_points)
 
-        # 4. Merge: keyword matches first (more precise for name/role lookups),
+        # Case C: Structural citations (e.g. "page 32", "section H", "article 6")
+        structural_points = []
+        page_match = _PAGE_PATTERN.search(query)
+        section_match = _SECTION_PATTERN.search(query)
+        article_match = _ARTICLE_PATTERN.search(query)
+
+        if page_match or (section_match and article_match):
+            must_filters = []
+            if page_match:
+                must_filters.append(
+                    models.FieldCondition(
+                        key="page",
+                        match=models.MatchValue(value=int(page_match.group(1))),
+                    )
+                )
+
+            should_filters = []
+            if section_match:
+                should_filters.append(
+                    models.FieldCondition(
+                        key="text",
+                        match=models.MatchText(text=f"Section {section_match.group(1)}"),
+                    )
+                )
+            if article_match:
+                should_filters.append(
+                    models.FieldCondition(
+                        key="text",
+                        match=models.MatchText(text=f"Article {article_match.group(1)}"),
+                    )
+                )
+
+            try:
+                s_filter = models.Filter(
+                    must=must_filters or None,
+                    should=should_filters or None,
+                )
+                res, _ = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=s_filter,
+                    limit=5,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                if res:
+                    sec_term = f"section {section_match.group(1).lower()}" if section_match else ""
+                    art_term = f"article {article_match.group(1).lower()}" if article_match else ""
+                    def _struct_score(p):
+                        t = ((p.payload or {}).get("text", "")).lower()
+                        score = 0
+                        if sec_term and sec_term in t:
+                            score += 2
+                        if art_term and art_term in t:
+                            score += 1
+                        return score
+                    res.sort(key=_struct_score, reverse=True)
+                    structural_points = res
+                    logger.info("Structural query matched %d points in Qdrant.", len(structural_points))
+            except Exception as s_exc:
+                logger.warning("Structural scroll failed: %s", s_exc)
+
+        # 4. Merge: structural matches first, keyword matches next,
         #    then vector results, deduplicated, limited to top_k.
         seen_ids: set[str] = set()
         merged_points = []
 
-        for point in keyword_points + list(vector_points):
+        for point in structural_points + keyword_points + list(vector_points):
             pid = str(point.id)
             if pid not in seen_ids:
                 seen_ids.add(pid)
