@@ -277,7 +277,7 @@ def prepare_chunks(records: list[dict]) -> list[dict]:
 
 
 def ensure_collection(client: QdrantClient, collection_name: str, dim: int):
-    """Ensure the target Qdrant collection exists with proper dimensions & cosine distance."""
+    """Ensure the target Qdrant collection exists with proper dimensions & cosine distance, and full-text index."""
     try:
         coll = client.get_collection(collection_name)
         logger.info(
@@ -285,6 +285,18 @@ def ensure_collection(client: QdrantClient, collection_name: str, dim: int):
             collection_name,
             coll.points_count or 0,
         )
+        schema = getattr(coll, "payload_schema", {}) or {}
+        if "text" not in schema:
+            client.create_payload_index(
+                collection_name=collection_name,
+                field_name="text",
+                field_schema=models.TextIndexParams(
+                    type="text",
+                    tokenizer=models.TokenizerType.WORD,
+                    lowercase=True,
+                ),
+            )
+            logger.info("Created full-text payload index on 'text' field.")
     except Exception:
         logger.info(
             "Collection '%s' does not exist. Creating collection (size=%d, distance=Cosine)...",
@@ -296,6 +308,15 @@ def ensure_collection(client: QdrantClient, collection_name: str, dim: int):
             vectors_config=models.VectorParams(
                 size=dim,
                 distance=models.Distance.COSINE,
+            ),
+        )
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="text",
+            field_schema=models.TextIndexParams(
+                type="text",
+                tokenizer=models.TokenizerType.WORD,
+                lowercase=True,
             ),
         )
 
