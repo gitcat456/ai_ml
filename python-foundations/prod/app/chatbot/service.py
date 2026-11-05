@@ -1,12 +1,15 @@
 import logging
 import re
 import time
+import uuid
 from textwrap import dedent
 
 from groq import Groq
 
 from app.config import FAST_LLM_MODEL, GROQ_API_KEY, LLM_MODEL
 from app.schemas import ChatRequest, ChatResponse, Source
+
+from app.chatbot.logger import log_interaction
 
 from app.chatbot.router import QueryRouter, Route
 from app.chatbot.memory import ConversationMemory
@@ -61,10 +64,42 @@ class ChatbotService:
         self.fast_model = FAST_LLM_MODEL or LLM_MODEL
 
     def chat(self, request: ChatRequest) -> ChatResponse:
+        session_id = request.session_id or str(uuid.uuid4())
+        message = request.message
+        t_start = time.monotonic()
+
+        answer: str | None = None
+        error_str: str | None = None
+        try:
+            response = self._process_chat(request, t_start)
+            answer = response.answer
+            return response
+        except Exception as exc:
+            msg = str(exc).strip()
+            if not msg:
+                error_str = f"exception: {type(exc).__name__}"
+            else:
+                msg = re.sub(r"(gsk_[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+)", "[REDACTED_KEY]", msg)
+                error_str = f"exception: {msg}"
+            answer = None
+            raise
+        finally:
+            latency_ms = int(round((time.monotonic() - t_start) * 1000))
+            try:
+                log_interaction(
+                    question=message,
+                    answer=answer,
+                    latency_ms=latency_ms,
+                    error=error_str,
+                    session_id=session_id,
+                )
+            except Exception as log_exc:
+                logger.warning("Failed to log interaction: %s", log_exc)
+
+    def _process_chat(self, request: ChatRequest, t_start: float) -> ChatResponse:
         session_id = request.session_id
         message = request.message
 
-        t_start = time.monotonic()
         logger.info(
             "Chat request received: session=%s message=%r",
             session_id,
@@ -163,13 +198,7 @@ class ChatbotService:
             )
         except RuntimeError as exc:
             logger.error("Answer generation failed: %s", exc)
-            return ChatResponse(
-                answer=(
-                    "I encountered an issue generating a response. "
-                    "Please try again in a moment."
-                ),
-                sources=[],
-            )
+            raise
 
         logger.info(
             "Answer generated: latency=%.3fs",
