@@ -1,10 +1,13 @@
+import json
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas import ChatRequest, ChatResponse
 from app.chatbot.service import ChatbotService
+from app.chatbot.logger import DEFAULT_LOG_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -39,3 +42,27 @@ def chat(request: ChatRequest):
             status_code=500,
             detail="An internal error occurred. Please try again.",
         )
+
+
+@router.get("/chat-logs")
+def view_chat_logs():
+    """
+    View all logged chatbot interactions directly in the browser or via API.
+    """
+    log_file = DEFAULT_LOG_FILE
+    if not log_file.exists():
+        cwd_log = Path("logs") / "chat_interactions.jsonl"
+        if cwd_log.exists():
+            log_file = cwd_log
+        else:
+            return {"interactions": []}
+
+    try:
+        return [
+            json.loads(line)
+            for line in log_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except Exception as exc:
+        logger.exception("Failed reading chat logs: %s", exc)
+        return {"interactions": [], "error": str(exc)}
