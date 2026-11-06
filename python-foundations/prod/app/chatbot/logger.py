@@ -70,6 +70,7 @@ def log_interaction(
         }
 
         line = json.dumps(entry, ensure_ascii=False) + "\n"
+        logger.info("CHAT_INTERACTION: %s", line.strip())
 
         target_paths = _get_target_paths(log_file)
         with _log_lock:
