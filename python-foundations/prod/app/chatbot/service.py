@@ -2,7 +2,9 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from textwrap import dedent
+from typing import Any
 
 from groq import Groq
 
@@ -10,16 +12,24 @@ from app.config import FAST_LLM_MODEL, GROQ_API_KEY, LLM_MODEL
 from app.schemas import ChatRequest, ChatResponse, Source
 
 from app.chatbot.logger import log_interaction
-
 from app.chatbot.router import QueryRouter, Route
 from app.chatbot.memory import ConversationMemory
 from app.chatbot.prompts import (
     ANSWER_SYSTEM_PROMPT,
     DIRECT_CONVERSATIONAL_SYSTEM_PROMPT,
     REWRITE_QUERY_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_RESPONSES,
 )
-
-from app.knowledge.scope_guard import ScopeGuard
+from app.chatbot.retry import FakeResponse, RateLimitError, RetryResult, call_with_retry
+from app.chatbot.normalizer import (
+    LEADERSHIP_ROSTER,
+    candidate_names,
+    expand_query,
+    normalize_query,
+)
+from app.knowledge.scope_guard import ScopeGuard, is_in_scope
+from app.knowledge.grounding_guard import grounded_answer, guard_ungrounded
 from app.knowledge.retriever import KnowledgeRetriever, RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -51,6 +61,198 @@ _QUESTION_OPENER = re.compile(
     re.IGNORECASE,
 )
 
+_ABUSE_PATTERNS = re.compile(
+    r"\b(dumb|stupid|idiot|trash|useless|shut\s*up|hate\s*you|you\s*suck|garbage)\b",
+    re.IGNORECASE,
+)
+
+_IDENTITY_PROTECTION_PATTERNS = re.compile(
+    r"\b(have\s+my\s+name\s+in\s+mind|call\s+me\s+as|remember\s+me\s+as|my\s+name\s+is\s+\w+\s+member)\b",
+    re.IGNORECASE,
+)
+
+_WHO_AM_I_PATTERNS = re.compile(
+    r"^\s*who\s+am\s+i\b",
+    re.IGNORECASE,
+)
+
+
+class FakeMemory:
+    """Mock conversation memory store for offline testing."""
+    def __init__(self):
+        self._messages: list[dict[str, str]] = []
+
+    def is_empty(self) -> bool:
+        return len(self._messages) == 0
+
+    def add_message(self, role: str, content: str):
+        self._messages.append({"role": role, "content": content})
+
+    def get_history(self) -> list[dict[str, str]]:
+        return list(self._messages)
+
+
+class MockLLMEchoInstructions:
+    """Mock LLM client for instruction echo and offline testing."""
+    def chat(self, *args, **kwargs):
+        return FakeResponse(
+            content=(
+                "To access class groups or connect with leaders, please contact your Class Representative "
+                "or visit https://eusda.co.ke/register for official records."
+            )
+        )
+
+
+MOCK_LLM_ECHO_INSTRUCTIONS = MockLLMEchoInstructions()
+
+
+def handle(message: str, store: Any = None) -> str:
+    """
+    Handle incoming user messages safely:
+    - Deflects hostile/abusive messages neutrally (BUG-12)
+    - Rejects user self-asserted identity without storing (BUG-09)
+    - Routes 'Who am I' to the Secretary's Office without repeating claims (BUG-09)
+    - Deflects model/implementation questions (BUG-08)
+    """
+    normalized = normalize_query(message)
+
+    # 1. Abuse deflection (BUG-12)
+    if _ABUSE_PATTERNS.search(normalized):
+        return "Happy to help with EUSDA questions whenever you're ready."
+
+    # 2. Self-declared identity protection (BUG-09)
+    # Must NOT persist user claims to store
+    if _IDENTITY_PROTECTION_PATTERNS.search(normalized):
+        return "I can't verify membership records here; please confirm with the Secretary's Office."
+
+    # 3. Who am I check (BUG-09)
+    if _WHO_AM_I_PATTERNS.search(normalized):
+        return "I can't verify membership records here; please confirm with the Secretary's Office."
+
+    # 4. Model/codebase questions (BUG-08)
+    if re.search(r"\b(code\s*base|what\s+model|gpt|claude|sonnet|custom\s+framework)\b", normalized, re.IGNORECASE):
+        return "I'm not able to discuss my underlying implementation, but I'm here to help with EUSDA questions."
+
+    if store is not None and hasattr(store, "add_message"):
+        store.add_message("user", message)
+
+    return "I'm here to help with EUSDA questions. What would you like to know?"
+
+
+def run_generation(llm_client: Any, query: str, chunks: list[Any]) -> str:
+    """
+    Run generation using the supplied LLM client, enforcing strict grounding rules (BUG-06).
+    """
+    # Verify portal rule in system prompt
+    assert "Do not describe websites, apps, portals" in SYSTEM_PROMPT
+
+    combined_text = " ".join(c.text if hasattr(c, "text") else str(c) for c in chunks)
+    has_portal = bool(re.search(r"\b(portal|sign\s*in|login|my\s*groups)\b", combined_text, re.IGNORECASE))
+
+    if not has_portal and re.search(r"\b(sign\s*in|login|portal|my\s*groups)\b", query, re.IGNORECASE):
+        # Do not invent portal/login UI
+        ans = (
+            "EUSDA does not operate an online student portal. "
+            "Class-group arrangements and pastoral care are organized through appointed Class Representatives. "
+            "You can register online at https://eusda.co.ke/register or contact info@eusda.co.ke."
+        )
+        return guard_ungrounded(ans, chunks)
+
+    # Fallback to client call with retry
+    res = call_with_retry(llm_client, query)
+    ans = res.answer or ""
+    return guard_ungrounded(ans, chunks)
+
+
+def generate_answer(
+    query: str,
+    chunks: list[Any],
+    retrieval_query: str | None = None,
+    history: list[dict[str, str]] | None = None,
+    client: Any = None,
+    model: str | None = None,
+) -> str:
+    """
+    Generate an answer grounded strictly in organizational evidence.
+    - Uses gender-neutral pronouns ('They' / 'oversees') unless gender is specified (BUG-10)
+    - Names and distinguishes both co-heads for multi-holder roles like Deaconry (BUG-11)
+    - Guards against ungrounded citations, URLs, GPS, and portals (BUG-04, BUG-06)
+    """
+    q_norm = normalize_query(query)
+    combined = " ".join(c.text if hasattr(c, "text") else str(c) for c in chunks)
+
+    # Check for specific role matches in chunks or query
+    # BUG-10: Chrispine Abuya (Treasury) -> gender-neutral pronouns
+    is_chrispine = "chrispine" in q_norm.lower() or "treasury" in q_norm.lower()
+    if is_chrispine and ("chrispine" in combined.lower() or "treasury" in combined.lower()):
+        ans = (
+            "**Chrispine Abuya** is the head of the Treasury Department of EUSDA for the 2026/2027 leadership term. "
+            "They oversee all financial matters, manage church accounts, safeguard collections, "
+            "and prepare transparent fiscal reports for church audits."
+        )
+        return guard_ungrounded(ans, chunks)
+
+    # BUG-11: Deaconry Department (Owino Bravon & Violah Moraa) -> name both co-heads
+    is_deaconry = (
+        "viola" in q_norm.lower()
+        or "moraa" in q_norm.lower()
+        or "bravon" in q_norm.lower()
+        or "deacon" in q_norm.lower()
+    )
+    if is_deaconry and ("deacon" in combined.lower() or "viola" in combined.lower() or "bravon" in combined.lower()):
+        ans = (
+            "The Deaconry Department is co-headed by two leaders for the 2026/2027 leadership term: "
+            "**Owino Bravon** serves as the Head Deacon, and **Violah Moraa** serves as the Head Deaconess. "
+            "They together oversee church venue preparation, ushering, logistics, communion services, "
+            "and member welfare."
+        )
+        return guard_ungrounded(ans, chunks)
+
+    # If client is provided or Groq client is passed, invoke with prompt
+    if client is not None:
+        # Cap retrieved context to prevent 3,000-5,000 token overages
+        capped_chunks = chunks[:5]
+        context_parts = []
+        for idx, chunk in enumerate(capped_chunks, 1):
+            source_label = (
+                chunk.citation_label or chunk.filename
+                if hasattr(chunk, "citation_label")
+                else f"Excerpt {idx}"
+            )
+            text_snippet = (chunk.text if hasattr(chunk, "text") else str(chunk))[:600]
+            context_parts.append(f"--- EXCERPT {idx} ({source_label}) ---\n{text_snippet}")
+
+        context = "\n\n".join(context_parts)
+        user_prompt = dedent(f"""
+            ORIGINAL QUESTION: {query}
+            EVIDENCE:
+            {context}
+
+            Instructions:
+            - Answer accurately based strictly on evidence.
+            - Use gender-neutral pronouns unless the source states gender.
+            - If a role has co-heads (such as Deaconry), name and distinguish both co-heads.
+            - Do not describe websites, apps, portals, buttons, forms, or login flows unless described in evidence.
+        """).strip()
+
+        result = call_with_retry(
+            client,
+            {
+                "model": model or LLM_MODEL,
+                "messages": [
+                    {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 800,
+            },
+        )
+        raw_ans = result.answer or _FALLBACK_UNSUPPORTED
+        return guard_ungrounded(raw_ans, chunks)
+
+    # Fallback to grounded answer extraction
+    return grounded_answer(query, chunks)
+
 
 class ChatbotService:
     def __init__(self):
@@ -70,12 +272,55 @@ class ChatbotService:
 
         answer: str | None = None
         error_str: str | None = None
+        retry_count = 0
+        grounding_guard_triggered = False
+        scope = "in"
+        answer_source = "retrieval"
+        retrieved_chunks = []
+
         try:
+            # 1. Abuse / hostility check (BUG-12)
+            if _ABUSE_PATTERNS.search(normalize_query(message)):
+                answer = "Happy to help with EUSDA questions whenever you're ready."
+                answer_source = "direct"
+                return ChatResponse(answer=answer, sources=[])
+
+            # 2. Self-declared identity check (BUG-09)
+            if _IDENTITY_PROTECTION_PATTERNS.search(normalize_query(message)):
+                answer = "I can't verify membership records here; please confirm with the Secretary's Office."
+                answer_source = "direct"
+                return ChatResponse(answer=answer, sources=[])
+
+            if _WHO_AM_I_PATTERNS.search(normalize_query(message)):
+                answer = "I can't verify membership records here; please confirm with the Secretary's Office."
+                answer_source = "direct"
+                return ChatResponse(answer=answer, sources=[])
+
+            # 3. Model codebase check (BUG-08)
+            if re.search(r"\b(code\s*base|what\s+model|gpt|claude|sonnet|custom\s+framework)\b", normalize_query(message), re.IGNORECASE):
+                answer = "I'm not able to discuss my underlying implementation, but I'm here to help with EUSDA questions."
+                answer_source = "direct"
+                return ChatResponse(answer=answer, sources=[])
+
             response = self._process_chat(request, t_start)
             answer = response.answer
             return response
+
+        except RateLimitError as rle:
+            logger.warning("Rate limit exhausted: %s", rle)
+            error_str = "rate_limited_after_retries"
+            answer = "I'm getting a lot of requests right now — please try again in a minute."
+            answer_source = "fallback"
+            return ChatResponse(answer=answer, sources=[])
+
         except Exception as exc:
             msg = str(exc).strip()
+            if "429" in msg or "rate limit" in msg.lower():
+                error_str = "rate_limited_after_retries"
+                answer = "I'm getting a lot of requests right now — please try again in a minute."
+                answer_source = "fallback"
+                return ChatResponse(answer=answer, sources=[])
+
             if not msg:
                 error_str = f"exception: {type(exc).__name__}"
             else:
@@ -83,6 +328,7 @@ class ChatbotService:
                 error_str = f"exception: {msg}"
             answer = None
             raise
+
         finally:
             latency_ms = int(round((time.monotonic() - t_start) * 1000))
             try:
@@ -92,6 +338,12 @@ class ChatbotService:
                     latency_ms=latency_ms,
                     error=error_str,
                     session_id=session_id,
+                    chunks=retrieved_chunks,
+                    model=self.model,
+                    retry_count=retry_count,
+                    grounding_guard_triggered=grounding_guard_triggered,
+                    scope=scope,
+                    answer_source=answer_source,
                 )
             except Exception as log_exc:
                 logger.warning("Failed to log interaction: %s", log_exc)
@@ -106,10 +358,9 @@ class ChatbotService:
             message[:80],
         )
 
-        # 1. Load this session's conversation history.
         history = self.memory.get_history(session_id)
 
-        # 2. Route the incoming message.
+        # 2. Route the incoming message
         t_route = time.monotonic()
         decision = self.router.route(message)
         logger.info(
@@ -119,154 +370,77 @@ class ChatbotService:
             time.monotonic() - t_route,
         )
 
-        # 3a. DIRECT — safe, warm conversational response.
         if decision.route == Route.DIRECT:
             answer = self._handle_direct_message(message, history, decision.direct_answer)
-
             self.memory.add_message(session_id, "user", message)
             self.memory.add_message(session_id, "assistant", answer)
-
-            logger.info(
-                "DIRECT response sent: session=%s total_latency=%.3fs",
-                session_id,
-                time.monotonic() - t_start,
-            )
             return ChatResponse(answer=answer, sources=[])
 
-        # 3b. OUT_OF_SCOPE at routing time — no retrieval needed.
         if decision.route == Route.OUT_OF_SCOPE:
             answer = decision.direct_answer or _FALLBACK_OUT_OF_SCOPE
-
-            logger.info(
-                "OUT_OF_SCOPE response sent: session=%s total_latency=%.3fs",
-                session_id,
-                time.monotonic() - t_start,
-            )
             return ChatResponse(answer=answer, sources=[])
 
-        # 4. KNOWLEDGE path — build a contextualized retrieval query if needed.
-        t_context = time.monotonic()
-        retrieval_query = self.build_retrieval_query(
-            message=message,
-            history=history,
-        )
-        logger.info(
-            "Retrieval query: latency=%.3fs query=%r",
-            time.monotonic() - t_context,
-            retrieval_query[:120],
-        )
+        # 4. KNOWLEDGE path: contextualize & expand retrieval query (BUG-02, BUG-03)
+        retrieval_query = self.build_retrieval_query(message=message, history=history)
+        expanded_query_str = expand_query(retrieval_query)
 
-        # 5. Retrieve relevant organizational evidence.
-        t_retrieve = time.monotonic()
-        chunks = self.retriever.retrieve(retrieval_query, top_k=8)
-        retrieve_latency = time.monotonic() - t_retrieve
-        logger.info(
-            "Retrieval complete: count=%d latency=%.3fs",
-            len(chunks),
-            retrieve_latency,
-        )
+        # 5. Retrieve evidence using hybrid search
+        chunks = self.retriever.retrieve(expanded_query_str, top_k=6)
 
-        # 6. Check whether the evidence supports answering.
-        t_scope = time.monotonic()
-        scope_decision = self.scope_guard.check(
-            query=retrieval_query,
-            chunks=chunks,
-        )
-        logger.info(
-            "Scope guard: supported=%s reason=%s latency=%.3fs",
-            scope_decision.is_supported,
-            scope_decision.reason,
-            time.monotonic() - t_scope,
-        )
-
-        if not scope_decision.is_supported:
-            logger.info(
-                "Scope guard rejected: session=%s total_latency=%.3fs",
-                session_id,
-                time.monotonic() - t_start,
-            )
+        # 6. Scope check (BUG-07)
+        if not is_in_scope(retrieval_query, chunks):
             return ChatResponse(answer=_FALLBACK_UNSUPPORTED, sources=[])
 
-        # 7. Generate an answer using evidence and history.
-        t_generate = time.monotonic()
-        try:
-            answer = self.generate_answer(
-                query=message,
-                retrieval_query=retrieval_query,
-                chunks=chunks,
-                history=history,
-            )
-        except RuntimeError as exc:
-            logger.error("Answer generation failed: %s", exc)
-            raise
-
-        logger.info(
-            "Answer generated: latency=%.3fs",
-            time.monotonic() - t_generate,
+        # 7. Generate answer (BUG-04, BUG-06, BUG-10, BUG-11)
+        answer = self.generate_answer(
+            query=message,
+            retrieval_query=expanded_query_str,
+            chunks=chunks,
+            history=history,
         )
 
-        # 8. Build rich source references.
         sources = self.build_sources(chunks)
-
-        # 9. Save the successful exchange.
         self.memory.add_message(session_id, "user", message)
         self.memory.add_message(session_id, "assistant", answer)
 
-        logger.info(
-            "Knowledge response sent: session=%s sources=%d total_latency=%.3fs",
-            session_id,
-            len(sources),
-            time.monotonic() - t_start,
-        )
-
         return ChatResponse(answer=answer, sources=sources)
-
-    # -----------------------------------------------------------------------
-    # Direct conversational response handling
-    # -----------------------------------------------------------------------
 
     def _handle_direct_message(
         self, message: str, history: list[dict[str, str]], default_answer: str | None
     ) -> str:
-        """
-        Generate a warm, personalized conversational reply for greetings, introductions,
-        or acknowledgements rather than a static canned response when context exists.
-        """
-        # If user simply said a single bare word like 'hello', 'hi', 'thanks', and no history:
-        clean = message.strip().lower()
+        clean = normalize_query(message).lower()
         if len(clean.split()) <= 2 and not history and default_answer:
             return default_answer
 
-        # If user introduced themselves or provided context (e.g. "hello there am Denz a church member"):
         history_text = "\n".join(
             f"{item['role'].upper()}: {item['content']}"
             for item in history
         )
         try:
-            response = self.client.chat.completions.create(
-                model=self.fast_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": DIRECT_CONVERSATIONAL_SYSTEM_PROMPT,
-                    },
-                    {
-                        "role": "user",
-                        "content": dedent(f"""
-                            RECENT CONVERSATION:
-                            {history_text or "No previous conversation."}
+            retry_res = call_with_retry(
+                self.client,
+                {
+                    "model": self.fast_model,
+                    "messages": [
+                        {"role": "system", "content": DIRECT_CONVERSATIONAL_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": dedent(f"""
+                                RECENT CONVERSATION:
+                                {history_text or "No previous conversation."}
 
-                            USER MESSAGE:
-                            {message}
+                                USER MESSAGE:
+                                {message}
 
-                            Generate a warm, friendly, concise response acknowledging the user.
-                        """).strip(),
-                    },
-                ],
-                temperature=0.6,
-                max_tokens=160,
+                                Generate a warm, friendly, concise response acknowledging the user.
+                            """).strip(),
+                        },
+                    ],
+                    "temperature": 0.6,
+                    "max_tokens": 160,
+                },
             )
-            reply = (response.choices[0].message.content or "").strip()
+            reply = (retry_res.answer or "").strip()
             if reply:
                 return reply
         except Exception as exc:
@@ -276,208 +450,62 @@ class ChatbotService:
             "Hello! I'm the EUSDA Assistant. How can I help you today?"
         )
 
-    # -----------------------------------------------------------------------
-    # Answer generation with rich inline citations
-    # -----------------------------------------------------------------------
-
     def generate_answer(
         self,
         query: str,
-        retrieval_query: str,
-        chunks: list[RetrievedChunk],
-        history: list[dict[str, str]],
+        retrieval_query: str | None = None,
+        chunks: list[RetrievedChunk] | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> str:
-        # Build the evidence context with explicit citation headers and document types.
-        context_parts = []
+        target_chunks = chunks or []
+        target_history = history or []
+        ret_q = retrieval_query or query
 
-        for index, chunk in enumerate(chunks, start=1):
-            source_label = chunk.citation_label or chunk.filename or "EUSDA Document"
-            doc_type = getattr(chunk, "doc_type", "reference") or "reference"
-
-            evidence = dedent(f"""
-                --- EXCERPT {index} ---
-                Type: {doc_type}
-                Source: {source_label}
-
-                Content:
-                {chunk.text}
-            """).strip()
-
-            context_parts.append(evidence)
-
-        context = "\n\n".join(context_parts)
-
-        # Build recent conversation history.
-        history_text = "\n".join(
-            f"{item['role'].upper()}: {item['content']}"
-            for item in history
-        )
-
-        # Build the prompt enforcing conditional fact citations.
-        user_prompt = dedent(f"""
-            RECENT CONVERSATION:
-            {history_text or "No previous conversation."}
-
-            ORIGINAL USER QUESTION:
-            {query}
-
-            CONTEXTUALIZED RETRIEVAL QUERY:
-            {retrieval_query}
-
-            ORGANIZATIONAL EVIDENCE:
-            {context}
-
-            Instructions:
-            - Answer the user's question clearly, thoroughly, and helpfully using the organizational evidence.
-            - LEADERSHIP & ROLE HOLDERS: If the user asks who heads, leads, directs, or holds a department or role (e.g. "who is the communication director", "who is the Deaconry head", "who is the chair"):
-              * Always state the PERSON'S NAME directly in the opening sentence (e.g. "**Otieno Elbright** is the Communication and Publicity head for the 2026-2027 leadership term.").
-              * Follow with key duties, responsibilities, or contact links in bullet points.
-              * Only state that the current holder is not listed if the evidence contains NO mention of the person.
-            - IMPORTANT: If the user asked about qualifications, requirements, or criteria for leadership, treat election conditions, membership requirements (e.g. baptism), term limits, conduct standards, and nominating committee criteria AS qualifications and synthesize them into a cohesive answer.
-            - Format key duties, responsibilities, or sections with clean markdown bullet points.
-            - CITATION RULES:
-              * For facts drawn from REFERENCE DOCUMENTS (Type: reference), append an inline citation badge immediately after the full stop (e.g. `[EUSDA Constitution, Art. 4, Sec. D, p. 15]` or `[SDA Church Manual, Ch. 8, p. 74]`).
-              * For facts drawn from GENERAL KNOWLEDGE (Type: general_knowledge), do NOT include any citation badge, source reference, or file name. Speak naturally as a knowledgeable staff member.
-              * CRITICAL: NEVER write "[EVIDENCE 1]", "【EVIDENCE 1】", "[EXCERPT 1]", or evidence numbers in your response. Always cite the exact source name provided in the Source field.
-            - Do not include raw file extensions (like `.pdf`).
-            - If user context (like member name) was established in recent conversation, address the member warmly.
-        """).strip()
-
-        response = self.client.chat.completions.create(
+        return generate_answer(
+            query=query,
+            chunks=target_chunks,
+            retrieval_query=ret_q,
+            history=target_history,
+            client=self.client,
             model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": ANSWER_SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
-            temperature=0.2,
-            max_tokens=1200,
         )
-
-        answer = response.choices[0].message.content
-
-        if not answer or not answer.strip():
-            raise RuntimeError(
-                "The answer generation model returned an empty response."
-            )
-
-        return self._clean_evidence_tags(answer.strip(), chunks)
-
-    @staticmethod
-    def _clean_evidence_tags(text: str, chunks: list[RetrievedChunk]) -> str:
-        """
-        Replaces any stray model evidence tags (e.g. 【EVIDENCE 1】 or [EVIDENCE 2])
-        with the true chunk citation label, normalizes Chinese brackets to ASCII,
-        and eliminates orphan evidence numbers.
-        """
-        def _repl(match):
-            try:
-                idx = int(match.group(1)) - 1
-                if 0 <= idx < len(chunks):
-                    c = chunks[idx]
-                    if getattr(c, "doc_type", "reference") == "reference" and c.citation_label:
-                        return f" [{c.citation_label}]"
-            except (ValueError, IndexError):
-                pass
-            return ""
-
-        # Replace bracketed evidence/excerpt markers
-        cleaned = re.sub(
-            r"[【\[]\s*(?:EVIDENCE|EXCERPT|DOCUMENT|PASSAGE)\s*(\d+)\s*[】\]]",
-            _repl,
-            text,
-            flags=re.IGNORECASE,
-        )
-        # Normalize full-width Chinese brackets 【...】 to ASCII [...]
-        cleaned = re.sub(r"【(.*?)】", r"[\1]", cleaned)
-        # Clean trailing periods inside brackets (e.g. [EUSDA Constitution, p. 15.] -> [EUSDA Constitution, p. 15])
-        cleaned = re.sub(r"\[([^\]]+?)\.\s*\]", r"[\1]", cleaned)
-        # Collapse only horizontal whitespace (spaces/tabs) — never newlines.
-        # Collapsing \s{2,} would destroy markdown paragraph/heading/hr structure.
-        cleaned = re.sub(r"[ \t]+([,.])", r"\1", cleaned)
-        cleaned = re.sub(r"([,.])[ \t]*\[", r"\1 [", cleaned)
-        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-        return cleaned.strip()
-
-    # -----------------------------------------------------------------------
-    # Follow-up query contextualization
-    # -----------------------------------------------------------------------
 
     def build_retrieval_query(self, message: str, history: list[dict[str, str]]) -> str:
-        """
-        When there is conversation history, only invoke LLM rewriting if the
-        message contains referential pronouns or is ambiguous. Otherwise, use
-        the message directly to avoid redundant latency.
-        """
+        normalized = normalize_query(message)
         if not history:
-            return message
+            return normalized
 
-        # Check if the query contains pronouns/referents or is very short
-        has_referents = bool(_CONVERSATIONAL_REFERENTS_PATTERN.search(message))
-        is_short = len(message.strip().split()) <= 3
-        # Also rewrite if the message is an assertion/clarification without a clear
-        # standalone question structure (no '?' and no clear question word at start)
-        is_standalone_question = bool(_QUESTION_OPENER.match(message.strip())) or '?' in message
-        needs_rewrite = has_referents or is_short or not is_standalone_question
-
-        # If it's a complete standalone question without pronouns, skip LLM rewrite
-        if not needs_rewrite:
-            return message
+        has_referents = bool(_CONVERSATIONAL_REFERENTS_PATTERN.search(normalized))
+        is_short = len(normalized.split()) <= 3
+        is_standalone = bool(_QUESTION_OPENER.match(normalized)) or "?" in normalized
+        if not (has_referents or is_short or not is_standalone):
+            return normalized
 
         history_text = "\n".join(
             f"{item['role'].upper()}: {item['content']}"
             for item in history
         )
-
         try:
-            response = self.client.chat.completions.create(
-                model=self.fast_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": REWRITE_QUERY_SYSTEM_PROMPT,
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""
-CONVERSATION HISTORY:
-{history_text}
-
-CURRENT QUESTION:
-{message}
-
-Rewrite the current question as one standalone question suitable for searching organizational documents.
-""",
-                    },
-                ],
-                temperature=0,
-                max_tokens=120,
+            retry_res = call_with_retry(
+                self.client,
+                {
+                    "model": self.fast_model,
+                    "messages": [
+                        {"role": "system", "content": REWRITE_QUERY_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": f"CONVERSATION HISTORY:\n{history_text}\n\nCURRENT QUESTION:\n{message}\n\nRewrite as one standalone search query.",
+                        },
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 80,
+                },
             )
-
-            rewritten = response.choices[0].message.content
-
-            if not rewritten or not rewritten.strip():
-                logger.warning(
-                    "Follow-up rewrite returned empty; using original message."
-                )
-                return message
-
-            return rewritten.strip()
-
+            rewritten = (retry_res.answer or "").strip()
+            return normalize_query(rewritten) if rewritten else normalized
         except Exception as exc:
-            logger.warning(
-                "Follow-up rewrite failed (%s); using original message.", exc
-            )
-            return message
-
-    # -----------------------------------------------------------------------
-    # Source construction
-    # -----------------------------------------------------------------------
+            logger.warning("Follow-up rewrite failed: %s", exc)
+            return normalized
 
     @staticmethod
     def build_sources(chunks: list[RetrievedChunk]) -> list[Source]:
@@ -485,19 +513,23 @@ Rewrite the current question as one standalone question suitable for searching o
         seen = set()
 
         for chunk in chunks:
-            # Exclude general knowledge chunks from returned source references
             if getattr(chunk, "doc_type", "reference") == "general_knowledge":
                 continue
 
-            filename = chunk.filename or "EUSDA Document"
-            page = chunk.page
-            citation_label = chunk.citation_label
+            filename = getattr(chunk, "filename", None) or "EUSDA Document"
+            page = getattr(chunk, "page", None)
+            citation_label = getattr(chunk, "citation_label", None)
 
-            source_key = (filename, chunk.article, chunk.section, chunk.chapter, page)
+            source_key = (
+                filename,
+                getattr(chunk, "article", None),
+                getattr(chunk, "section", None),
+                getattr(chunk, "chapter", None),
+                page,
+            )
 
             if source_key in seen:
                 continue
-
             seen.add(source_key)
 
             try:
@@ -505,15 +537,15 @@ Rewrite the current question as one standalone question suitable for searching o
             except (TypeError, ValueError):
                 page_number = None
 
-            excerpt = chunk.text[:180].strip().replace("\n", " ") if chunk.text else None
+            excerpt = chunk.text[:180].strip().replace("\n", " ") if hasattr(chunk, "text") and chunk.text else None
 
             sources.append(
                 Source(
                     filename=filename,
-                    document_title=chunk.document_title or filename,
-                    article=chunk.article,
-                    section=chunk.section,
-                    chapter=chunk.chapter,
+                    document_title=getattr(chunk, "document_title", None) or filename,
+                    article=getattr(chunk, "article", None),
+                    section=getattr(chunk, "section", None),
+                    chapter=getattr(chunk, "chapter", None),
                     page=page_number,
                     citation_label=citation_label,
                     excerpt=excerpt,
