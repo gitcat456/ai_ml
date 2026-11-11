@@ -129,9 +129,8 @@ _DIRECT_RESPONSES: dict[str, str] = {
         "Goodbye and God bless! Feel free to return whenever you have questions about EUSDA."
     ),
     "identity": (
-        "I'm the official EUSDA AI Assistant. I'm here to help members, students, "
-        "and visitors find information about the church — departments, ministries, "
-        "events, leadership roles, the EUSDA Constitution, and Church Manual. What would you like to know?"
+        "I'm the official EUSDA AI Assistant. I'm not able to discuss my underlying implementation, "
+        "but I'm here to help with EUSDA questions."
     ),
     "fallback_direct": (
         "I'm here to help with questions about EUSDA. "
@@ -276,11 +275,60 @@ def _normalize(message: str) -> str:
     return re.sub(r"\s+", " ", message.strip().lower())
 
 
+_ABUSE_PATTERNS = re.compile(
+    r"\b(dumb|stupid|idiot|trash|useless|shut\s*up|hate\s*you|you\s*suck|garbage)\b",
+    re.IGNORECASE,
+)
+_MODEL_QUESTION_PATTERNS = re.compile(
+    r"\b(what\s+model|code\s*base|gpt|claude|sonnet|gemini|llama|custom\s+framework|underlying\s+implementation)\b",
+    re.IGNORECASE,
+)
+_IDENTITY_PROTECTION_PATTERNS = re.compile(
+    r"\b(have\s+my\s+name\s+in\s+mind|call\s+me\s+as|remember\s+me\s+as|my\s+name\s+is\s+\w+\s+member)\b",
+    re.IGNORECASE,
+)
+_WHO_AM_I_PATTERNS = re.compile(
+    r"^\s*who\s+am\s+i\b",
+    re.IGNORECASE,
+)
+
+
 def _heuristic_check(normalized: str) -> RouteDecision | None:
     """
     Return a RouteDecision if the normalized text is an exact known phrase or matches
     high-confidence fast heuristics, else return None to consult the LLM.
     """
+    # Hostile/abuse input check (BUG-12)
+    if _ABUSE_PATTERNS.search(normalized):
+        return RouteDecision(
+            route=Route.DIRECT,
+            reason="Heuristic: hostile/abuse deflection.",
+            direct_answer="Happy to help with EUSDA questions whenever you're ready.",
+        )
+
+    # Model/codebase identity questions (BUG-08)
+    if _MODEL_QUESTION_PATTERNS.search(normalized):
+        return RouteDecision(
+            route=Route.DIRECT,
+            reason="Heuristic: model/identity inquiry.",
+            direct_answer="I'm not able to discuss my underlying implementation, but I'm here to help with EUSDA questions.",
+        )
+
+    # Self-declared identity or "Who am I" (BUG-09)
+    if _WHO_AM_I_PATTERNS.search(normalized):
+        return RouteDecision(
+            route=Route.DIRECT,
+            reason="Heuristic: user identity query.",
+            direct_answer="I can't verify membership records here; please confirm with the Secretary's Office.",
+        )
+
+    if _IDENTITY_PROTECTION_PATTERNS.search(normalized):
+        return RouteDecision(
+            route=Route.DIRECT,
+            reason="Heuristic: user self-declaration.",
+            direct_answer="I can't verify membership records here; please confirm with the Secretary's Office.",
+        )
+
     if normalized in _EXACT_DIRECT_PHRASES:
         category = _guess_direct_category(normalized)
         return _make_direct_decision(category, f"Heuristic match for '{normalized}'.")
